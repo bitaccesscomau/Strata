@@ -962,6 +962,8 @@ struct Prefill::Impl {
     uint16_t* dq_gu[DQ] = {};
     uint16_t* dq_d[DQ] = {};
     uint8_t* stage_dev[RING_MAX] = {};
+    // the bytes of each ring slot (STRATA_MMQ_DIRECT_RING: room for a streamed blob plus its down over-read guard)
+    uint64_t stage_room[RING_MAX] = {};
     int ring = STAGE;                        // the slots of this layout's ring (ring_slots)
     // this layout's GU, H and Xq are the fused path's (moe_bufs' `fused`), so a layer that runs MMQ or the FP16 path may
     // only write stream_all_min() - 1 of its rows into them; fused_layout() keeps the two in step (#583, #954)
@@ -1240,6 +1242,30 @@ const MmqPlan& mmq_plan() {
         return p;
     }();
     return plan;
+}
+// STRATA_MMQ_DIRECT_RING=1 (opt-in; with STRATA_MMQ_DIRECT=1 on a build with the pointer-table MMQ, STRATA_MMQ_TAB): in the
+// streamed walk (a chunk of stream_all_min() tokens or more) the STREAMED experts are read in their ring slots as well,
+// instead of being copied into the group buffers first.  STRATA_MMQ_DIRECT=1 alone reads only the resident ones in place,
+// and on a card that streams most experts (an RTX 3090 at 256K: 7,733 of 24,576 resident during a prompt) the copy of the
+// streamed ones stays: 7.1 s of a 255K-token prompt's 136 s GPU time in the `dequant` phase.  The group, its launch (tile
+// size, stream-k split) and the weight bytes are the gathered path's; only the address MMQ reads each expert from moves
+// (the ring slot instead of the group buffer), so the products are the same bits.  A ring slot keeps 256 bytes after the
+// largest blob (Alloc::take's slack), so the down product's over-read lands in the slot's own guard, zeroed before the
+// group like a cache slot's.  The slot goes back to the issuer only after the group's down product has read it.
+bool mmq_direct_ring() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_MMQ_DIRECT_RING");
+        const bool want = v != nullptr && v[0] == '1';
+        if (want && mmq::direct_mode() != 1) {
+            std::fprintf(stderr, "strata: STRATA_MMQ_DIRECT_RING=1 is ignored: it needs STRATA_MMQ_DIRECT=1 on a build with "
+                                 "the pointer-table MMQ (-DSTRATA_MMQ_TAB=ON)\n");
+            return false;
+        }
+        if (want)
+            std::fprintf(stderr, "strata: prompt MMQ reads streamed experts in their ring slots (STRATA_MMQ_DIRECT_RING=1)\n");
+        return want;
+    }();
+    return on;
 }
 // the FP16 buffers (Xs, Hh): the FP16 path's, or pf_wmma's activations and down input
 bool fp16_bufs(const MmqPlan& mp) { return mp.fallback || pf_wmma(); }
@@ -1642,12 +1668,14 @@ bool Prefill::carve(size_t T, void* alloc) {
         uint8_t* ring_base = o.take<uint8_t>((size_t) nstage * (size_t) MAXBLOB(), ok);
         for (int i = 0; ok && i < nstage; ++i) {
             m.stage_dev[i] = ring_base + (size_t) i * (size_t) MAXBLOB();
+            m.stage_room[i] = (uint64_t) MAXBLOB();          // contiguous: no room past the largest blob
             m.stage_live[i] = false;
             m.used_of[i] = i;
         }
     } else {
         for (int i = 0; i < nstage; ++i) {
             m.stage_dev[i] = o.take<uint8_t>((size_t) MAXBLOB(), ok);
+            m.stage_room[i] = ((uint64_t) MAXBLOB() + 256 + 255) & ~255ull;   // what `take` reserved for it
             m.stage_live[i] = false;                        // a new buffer: nothing of an earlier layout to wait for
             m.used_of[i] = i;
         }
@@ -4450,6 +4478,13 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         mmq::WeightTab tgu, td;
                         mmq::GuardTab gd;
                         int ns = 0;
+                        // STRATA_MMQ_DIRECT_RING=1: the open group's streamed experts read in their ring slots (`held`,
+                        // in stream order) and the first of their stream entries (`held_from`): until the group's down
+                        // product is queued, no slot from there on goes back to the issuer
+                        const bool ring_direct = direct && stream_all && !m.pp && mmq_direct_ring();
+                        int held[MMQ_GROUP];
+                        int n_held = 0;
+                        size_t held_from = SIZE_MAX, cur_k = SIZE_MAX;
                         // `zero`: the MMQ tail zeroed after the gathered experts (the group's last flush); a direct
                         // group's tail is zeroed by prep_group
                         auto flush = [&](size_t zero) {
@@ -4496,11 +4531,24 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     uint8_t* gp = cslot >= 0 && ((uintptr_t) blob_dev | (uintptr_t) f.down_off) % 16 == 0
                                                       ? m.cache->slot_tail(cslot, f.bytes, mmq_plan().d_over[(size_t) l])
                                                       : nullptr;
+                                    // STRATA_MMQ_DIRECT_RING=1: a streamed expert in its ring slot, the guard in the slot's
+                                    // own room past the blob
+                                    const bool in_ring = gp == nullptr && ring_direct && slot >= 0 && cslot < 0 &&
+                                                         blob_dev == m.stage_dev[slot] &&
+                                                         ((uintptr_t) blob_dev | (uintptr_t) f.down_off) % 16 == 0 &&
+                                                         (uint64_t) f.bytes + mmq_plan().d_over[(size_t) l] <= m.stage_room[slot];
+                                    if (in_ring) gp = m.stage_dev[slot] + f.bytes;
                                     if (gp) {   // read in its slot: the guard after the blob is zeroed at the group end
                                         tgu.p[q] = blob_dev;
                                         td.p[q] = blob_dev + f.down_off;
                                         gd.p[gd.n++] = gp;
-                                        ++stats_.experts_direct;
+                                        if (in_ring) {   // its slot is given back after the group's down product
+                                            held[n_held++] = slot;
+                                            if (held_from == SIZE_MAX) held_from = cur_k;
+                                            ++stats_.experts_direct_ring;
+                                        } else {
+                                            ++stats_.experts_direct;
+                                        }
                                     } else {
                                         const int c = ns++;
                                         tgu.p[q] = m.grp_gu + (size_t) c * mmq_gub;
@@ -4515,7 +4563,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                                                m.grp_d + (size_t) c * mmq_db, m.cs);
                                         }
                                     }
-                                    if (slot >= 0 && !gg_now) { cudaEventRecord(m.used[slot], m.cs); m.used_of[slot] = slot; }
+                                    if (slot >= 0 && !gg_now && !in_ring) { cudaEventRecord(m.used[slot], m.cs); m.used_of[slot] = slot; }
                                     if (q + 1 < MMQ_GROUP && j + 1 < order.size()) return true;
                                     if (gg_now) {   // also when the last entry was direct (a no-op without gathers)
                                         flush(0);
@@ -4569,11 +4617,19 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     return true;
                                 }
                                 if (direct) {
+                                    // STRATA_MMQ_DIRECT_RING: the held ring slots' copies (in order: the last covers the
+                                    // others) land before their guards are zeroed and MMQ reads them
+                                    if (n_held > 0) {
+                                        pt.mark(kPfWaitCopy, cs);
+                                        cudaStreamWaitEvent(m.cs, m.copied[held[n_held - 1]], 0);
+                                        pt.mark(kPfDequant, cs);
+                                    }
                                     // one launch: the direct experts' guards (their down over-read) and the zeroed tail
                                     // after the last gathered expert (see MMQ_TAIL)
                                     mmq::prep_group(gd, mmq_plan().d_over[(size_t) l],
                                                     ns ? m.grp_gu + (size_t) ns * mmq_gub : nullptr,
                                                     ns ? m.grp_d + (size_t) ns * mmq_db : nullptr, MMQ_TAIL, m.cs);
+                                    pt.mark(kPfGemmGU, cs);
                                 }
                                 mmq::Product gu;
                                 gu.w = m.grp_gu; gu.type = mmq_gt; gu.w_rows = 1280; gu.w_cols = N; gu.expert_bytes = mmq_gub;
@@ -4606,6 +4662,13 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     td = mmq::WeightTab{};
                                     gd = mmq::GuardTab{};
                                     ns = 0;
+                                }
+                                if (n_held > 0) {   // the down product was the held slots' last reader: one event for all
+                                    const int rel = held[n_held - 1];
+                                    cudaEventRecord(m.used[rel], m.cs);
+                                    for (int i = 0; i < n_held; ++i) m.used_of[held[i]] = rel;
+                                    n_held = 0;
+                                    held_from = SIZE_MAX;   // the caller gives the entries back
                                 }
                                 return true;
                             }
@@ -4671,6 +4734,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             // pick only gives its slot back
                             size_t k = seq_start[(size_t) l];
                             const size_t kend = seq_start[(size_t) l + 1];
+                            // STRATA_MMQ_DIRECT_RING: never past the open group's first held entry (held_from is SIZE_MAX
+                            // otherwise, and then this is give_back itself)
+                            auto give_back_held = [&](size_t upto) { give_back(std::min(upto, held_from)); };
                             auto release_to = [&](int32_t e_stop) {
                                 while (k < kend && seq[k].e < e_stop) {
                                     if (gg_nslots > 0) flush(0);   // the open group's slots get their event first
@@ -4678,7 +4744,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     cudaEventRecord(m.used[sl], m.cs);
                                     m.used_of[sl] = sl;
                                     consumed = ++k;
-                                    give_back(consumed);
+                                    give_back_held(consumed);
                                 }
                             };
                             for (size_t j = 0; j < order.size(); ++j) {
@@ -4691,9 +4757,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                         pt.mark(kPfWaitCopy, cs);
                                         cudaStreamWaitEvent(m.cs, m.copied[sl], 0);
                                     }
+                                    cur_k = k;
                                     if (!compute(j, m.stage_dev[sl], sl, -1)) return false;
                                     consumed = ++k;
-                                    if (!group_gather || gg_nslots == 0) give_back(consumed);   // its group was gathered
+                                    if (!group_gather || gg_nslots == 0) give_back_held(consumed);   // its group was gathered
                                 } else {
                                     const bool r0 = m.host_res && m.cache && m.host_res[(size_t) l * m.g->n_expert + e] >= 0;
                                     const uint8_t* bp = r0 ? m.cache->device_slot(m.host_res[(size_t) l * m.g->n_expert + e])
@@ -4701,10 +4768,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     if (bp == nullptr) { err = "prefill: an expert is neither resident, streamed nor on the peer"; return false; }
                                     ++stats_.experts_resident;
                                     if (!compute(j, bp, -1, r0 ? m.host_res[(size_t) l * m.g->n_expert + e] : -1)) return false;
-                                    if (group_gather && gg_nslots == 0) give_back(consumed);
+                                    if (group_gather && gg_nslots == 0) give_back_held(consumed);
                                 }
                             }
                             release_to(m.g->n_expert);
+                            if (n_held > 0) { err = "prefill: a layer ended with ring slots held (STRATA_MMQ_DIRECT_RING)"; return false; }
                         }
                     }
                     pt.mark(kPfCombine, cs);
@@ -5107,9 +5175,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         static const bool log = [] { const char* v = std::getenv("STRATA_MMQ_DIRECT_LOG"); return v && std::atoi(v) != 0; }();
         for (const Prefill* p = this; log && p != nullptr; p = p->next_)
             std::fprintf(stderr, "strata prefill: layers %lld..%lld: %lld of %lld resident experts read in place, %lld "
-                                 "streamed (STRATA_MMQ_DIRECT, totals)\n", (long long) p->stage_lb_,
-                         (long long) p->stage_le_, (long long) p->stats_.experts_direct,
-                         (long long) p->stats_.experts_resident, (long long) p->stats_.experts_streamed);
+                                 "streamed, %lld of them read in their ring slots (STRATA_MMQ_DIRECT, totals)\n",
+                         (long long) p->stage_lb_, (long long) p->stage_le_, (long long) p->stats_.experts_direct,
+                         (long long) p->stats_.experts_resident, (long long) p->stats_.experts_streamed,
+                         (long long) p->stats_.experts_direct_ring);
     }
     return true;
 }

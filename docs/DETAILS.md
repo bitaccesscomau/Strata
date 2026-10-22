@@ -2078,6 +2078,26 @@ the pairs in which the switched arm won). They are here so you can try them on y
   `tools/batch_test.py --n 16` prompts (solo and batch) were identical too, and to those of a build without the
   option. The uniform cache (no profile) holds no resident expert when a native pack's prompt is read (serve needs the
   profile, and a one-shot run fills the cache only while it decodes), so `expert_cache_slot_guard_test` covers it.
+- **`STRATA_MMQ_DIRECT_RING=1`: the prompt's streamed experts are read in their ring slots too** (opt-in; needs
+  `STRATA_MMQ_DIRECT=1` and the build option `-DSTRATA_MMQ_TAB=ON`).  `STRATA_MMQ_DIRECT=1` reads only the RESIDENT
+  experts in place; on a card that streams most of them (RTX 3090 24 GB, IQ3_XXS, 256K context: 7,733 of 24,576 resident
+  while a prompt is read) the streamed ones still go through the group buffers, which was 7.1 s of a 254,990-token
+  prompt's 136 s.  With this on, a streamed expert whose blob sits in its ring slot joins the group's pointer table like a
+  resident one.  A ring slot keeps 256 bytes past its blob (`Alloc::take` rounds up), so the down product's over-read
+  lands in the slot's own guard, zeroed per group exactly as a cache slot's guard is; the slot goes back to the copy
+  issuer only after the group's down product is queued.  The groups, their launches and the weight bytes are the
+  gathered path's, so the only thing that moves is the address MMQ reads each expert from.
+  Measured on one RTX 3090 (PCIe 3.0 x16, DDR4-2133, 250 W), IQ3_XXS, three rotated A/B rounds at 255K tokens, engine
+  timings, run 2 of each arm: prefill 136,412 / 136,572 / 134,974 ms on the same build with `STRATA_MMQ_DIRECT=1` alone
+  against 133,950 / 133,909 / 133,366 ms with the ring reads (1.016 / 1.017 / 1.029 of the `DIRECT` arm, 3/3 rounds
+  faster; +1.8% against the build with neither knob), and decode unchanged within noise.  The copy it removes
+  (`dequant` 7,121 -> 4,012 ms in a `STRATA_PREFILL_TIMING` run) is partly offset by a rise in `kv stage`, so the end to
+  end gain is 1.7% to 1.8% and not the 2.3% the copy alone would suggest.  Answers: identical to the same build with
+  `STRATA_MMQ_DIRECT=1` alone on four prompts of 35 to 86,130 tokens (greedy 200-token answers, the first decode
+  window's logits and the prompt path's residual dump all byte-identical); the default path (this knob unset) is
+  byte-identical to the build without either variable.  Against a build WITHOUT `STRATA_MMQ_DIRECT` the answers differ,
+  as they already do with `STRATA_MMQ_DIRECT=1` alone: that knob keeps a 256-byte guard in every sized cache slot, which
+  costs two slots (10,315 -> 10,313 here) and changes which experts the GPU holds while it decodes.
 
 ## Which logical processors the CPU workers use, and `--pool-cores` (experimental, off by default)
 
