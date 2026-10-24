@@ -10096,8 +10096,10 @@ int main(int argc, char** argv) {
                 const Clock::time_point t1 = Clock::now();
                 const bool verify = ckpt_async_verify_env();
                 ConvCheckpoint ref;   // STRATA_CKPT_ASYNC_VERIFY: the synchronous save, compared with when it joins
-                ref.ids = c.ids;
-                if (verify && !checkpoint_save(ref, ss, g)) return false;
+                if (verify) {
+                    ref.ids = c.ids;
+                    if (!checkpoint_save(ref, ss, g)) return false;
+                }
                 const bool reused = !c.gdn.empty();   // (a pooled one)
                 c.stage_parts.clear();
                 if (seg_plan.chunk > 0 && L > seg_plan.from && L < seg_plan.to) c.plan = seg_plan;   // as below, now
