@@ -27,12 +27,14 @@ talks to it over stdin/stdout; `MockEngine` is a scripted stand-in that makes ev
 from __future__ import annotations
 
 import argparse
+import array
 import contextlib
 import collections
 import base64
 import hashlib
 import hmac
 import codecs
+import itertools
 import ctypes
 import json
 import math
@@ -949,6 +951,79 @@ def parse_stage_in_flight_sample(line: str) -> dict | None:
     return {"elapsed_us": elapsed_us, "in_flight_us": in_flight_us}
 
 
+# STRATA_SERVE_INCREMENTAL_IDS=1 (the server's environment, read once; off by default): a GEN / BGEN line that starts
+# with the ids of a recent line takes their text from that line (IdText).  The line is the same either way.
+INCREMENTAL_IDS = os.environ.get("STRATA_SERVE_INCREMENTAL_IDS", "0") == "1"
+
+
+class IdText:
+    """The ids of a GEN / BGEN line as the engine reads them (`1,22,333`), taken from a recent line's text as far as
+    the two lines have the same ids (STRATA_SERVE_INCREMENTAL_IDS=1).
+
+    A client resends its whole conversation every turn and the engine reuses all but the newest part, but every id
+    was formatted again: at 255K ids that is tens of milliseconds a turn (#567 made the tokenizing incremental, not
+    this).  Here a line whose first n ids are a kept line's takes the kept line's text for them and formats only the
+    rest.
+
+    WHY THAT IS EXACT.  A line's text is each id's text joined by commas, so the text of its first n ids is the first
+    (digits of those n ids + n - 1) characters of the text of any line with the same first n ids.  The shared start
+    is found by comparing the id lists themselves, never inferred from the rendered prompt: an edited message, a new
+    system prompt, a reasoning block the template drops, another picture or a BPE merge across the old prompt's end
+    each stop it at the first id that differs, and the rest is formatted.  A line of fewer than MIN ids, or one that
+    shares fewer than MIN with every kept line, is formatted in full as before (and a short one is not kept).
+    """
+
+    MIN = 4096          # below this a whole line formats in about a millisecond: nothing to gain
+    NEAR = 64           # a turn usually shares all of the kept line but its last few ids
+
+    def __init__(self, keep: int = 4):
+        self.keep = keep
+        # (ids, text, digits): digits[i] = the characters of ids[:i]'s text without its commas (len(ids) + 1 entries)
+        self.entries: list[tuple[list, str, array.array]] = []
+        self.lock = threading.Lock()
+
+    @classmethod
+    def shared(cls, a: list, b: list) -> int:
+        """How many ids two lines start with in common.  A turn's prompt usually holds all of the previous one but
+        its last ids (the generation prompt's end, which the reply's text can merge with), so that is tried first,
+        in one compare; slice compares either way (C speed)."""
+        from strata_tokenizer import common_prefix_len  # (generic over sequences)
+        n = min(len(a), len(b))
+        m = max(0, n - cls.NEAR)
+        if a[:m] == b[:m]:
+            return m + common_prefix_len(a[m:n], b[m:n])
+        return common_prefix_len(a, b)
+
+    def text(self, ids) -> tuple[str, int]:
+        """(the ids' text, how many of them came from a kept line's text)."""
+        if len(ids) < self.MIN:
+            return ",".join(str(int(t)) for t in ids), 0
+        ids = list(ids)              # a copy: the caller's list may change after the send
+        with self.lock:
+            entries = self.entries   # replaced, never changed in place
+        src, n = None, 0
+        for e in entries:
+            k = self.shared(e[0], ids)
+            if k > n:
+                src, n = e, k
+        if n < self.MIN:
+            src, n = None, 0
+            parts = [str(int(t)) for t in ids]
+            text = ",".join(parts)
+            digits = array.array("q", itertools.accumulate(map(len, parts), initial=0))
+        else:
+            parts = [str(int(t)) for t in ids[n:]]
+            head = src[1][:src[2][n] + n - 1]
+            text = "".join((head, ",", ",".join(parts))) if parts else head
+            digits = src[2][:n + 1]
+            digits.extend(itertools.islice(itertools.accumulate(map(len, parts), initial=digits[n]), 1, None))
+        # one kept line per conversation: a line replaces the one it goes on from (more than half of it reused)
+        old = src if src is not None and 2 * n > len(src[0]) else None
+        with self.lock:
+            self.entries = [(ids, text, digits)] + [e for e in self.entries if e is not old][:self.keep - 1]
+        return text, n
+
+
 class StrataEngine:
     """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -1465,6 +1540,18 @@ class StrataEngine:
         on = sampling.get("experimental_speed_projection")
         return f" cvec={int(on)}" if isinstance(on, bool) else ""
 
+    def _ids_text(self, ids) -> str:
+        """The ids of a GEN / BGEN line.  STRATA_SERVE_INCREMENTAL_IDS=1: from a recent line's text (IdText)."""
+        if not INCREMENTAL_IDS:
+            return ','.join(str(int(t)) for t in ids)
+        cache = self.__dict__.get("id_text")
+        if cache is None:
+            cache = self.__dict__.setdefault("id_text", IdText())
+        text, reused = cache.text(ids)
+        if reused:
+            print(f"[strata] GEN line: {reused:,} of {len(ids):,} ids from a recent line's text", flush=True)
+        return text
+
     def _send(self, text: str):
         btrace("send>", text[:60])
         try:
@@ -1809,7 +1896,7 @@ class StrataEngine:
                     deadline = getattr(cancel, "_strata_queue_deadline", None)
                     if deadline is not None and time.monotonic() >= deadline:
                         raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
-                    self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
+                    self._send(f"{head} {self._ids_text(prompt)}")
                     if deadline is not None:
                         cancel._strata_queue_deadline = None
                     started = getattr(cancel, "_strata_queue_started", None)
@@ -1937,7 +2024,7 @@ class StrataEngine:
                         raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
                     self.slot_live[slot] = live
                     self._last_done = None                  # (#879: this admission's DONE decides below)
-                    self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
+                    self._send(f"{head} {self._ids_text(prompt)}")
                     if deadline is not None:
                         cancel._strata_queue_deadline = None
                     started = getattr(cancel, "_strata_queue_started", None)
@@ -2199,7 +2286,7 @@ class StrataEngine:
         head = f"GENI {int(max_new)}{self.sampling_keys(sampling or {})} {embeddings}" if embeddings else \
             f"GEN {int(max_new)}{self.sampling_keys(sampling or {})}"
         try:
-            self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
+            self.proc.stdin.write(f"{head} {self._ids_text(ids)}\n")
             self.proc.stdin.flush()
         except OSError:                                  # the pipe is gone: the engine died (not the client)
             raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None

@@ -1149,6 +1149,13 @@ follows the reused prefix (or the root) is read in one run, and its session is n
 It still starts from a checkpoint it matches, and still saves the system-prompt root when that reaches
 `--prompt-cache-root`. Without the field (or with `true`) nothing changes.
 
+**The ids of a long follow-up prompt (opt-in, `STRATA_SERVE_INCREMENTAL_IDS=1` in the server's environment; the
+config's `env` reaches only the engine).** The server sends the engine every prompt's ids as text, and a follow-up turn
+of a long conversation repeats the previous turn's ids. With the switch, a line that starts with the ids of a recent line
+takes their text from it and formats only the rest; the shared start is found by comparing the ids, so the line is
+byte-identical. Prompts under 4,096 tokens are formatted as before. The server log says `GEN line: N of M ids from a
+recent line's text` when it applies.
+
 **Checkpoints spread back from the end (opt-in, `--prompt-cache-spread`).** Least recent use keeps the newest points:
 every turn adds a checkpoint at its start, so after a few short turns the 6 sit within the last 1-2K tokens. An agent
 client that rewrites its history a few thousand tokens back (it trims an old tool output, drops a step) then matches
