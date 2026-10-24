@@ -348,22 +348,27 @@ void full_session(int fmt, int mode, int experts) {
             return x.gdn==want.gdn && x.ple==want.ple && x.tails==want.tails && x.dead==want.dead && x.block_pos==want.block_pos;
         };
         check(same(fresh),"staged checkpoint equals the synchronous save");
-        {   // the same image copied part by part (a driver that refused the gather kernel): the same bytes
+        check(same(pooled),"staged into a pooled checkpoint's vectors: every byte overwritten");
+        check(conversation_checkpoint_validate(fresh,ss,g,err),"staged checkpoint validates");
+        cuda_check(cudaStreamSynchronize(writer));
+        {   // the same state copied part by part (a driver that refused the gather kernel): what a save taken here holds.
+            // After the writers above, so the reference is saved at the same point (the state has changed since `want`)
             void* fallback=nullptr;
             cuda_check(cudaHostAlloc(&fallback,lay.bytes,cudaHostAllocDefault));
-            ConversationCheckpoint copy_by_copy; copy_by_copy.ids=head;
+            ConversationCheckpoint reference,copy_by_copy;
+            reference.ids=head; copy_by_copy.ids=head;
+            check(conversation_checkpoint_save(reference,ss,g,err),"synchronous reference save, part-by-part image");
             check(conversation_checkpoint_queue(fallback,nullptr,lay,ss,copy,small_done,err),"queue the copies part by part");
             cuda_check(cudaEventRecord(gdn_done,copy));
             cuda_check(cudaEventSynchronize(small_done));
             conversation_checkpoint_unstage(copy_by_copy,fallback,lay,false);
             cuda_check(cudaEventSynchronize(gdn_done));
             conversation_checkpoint_unstage(copy_by_copy,fallback,lay,true);
-            check(same(copy_by_copy),"the part-by-part copies give the same checkpoint");
+            check(copy_by_copy.gdn==reference.gdn && copy_by_copy.ple==reference.ple &&
+                  copy_by_copy.tails==reference.tails && copy_by_copy.dead==reference.dead &&
+                  copy_by_copy.block_pos==reference.block_pos,"the part-by-part copies give the same checkpoint");
             cuda_check(cudaFreeHost(fallback));
         }
-        check(same(pooled),"staged into a pooled checkpoint's vectors: every byte overwritten");
-        check(conversation_checkpoint_validate(fresh,ss,g,err),"staged checkpoint validates");
-        cuda_check(cudaStreamSynchronize(writer));
         fill(201);
         check(conversation_checkpoint_restore(fresh,ss,g,err),"restore the staged checkpoint");
         ConversationCheckpoint back;
