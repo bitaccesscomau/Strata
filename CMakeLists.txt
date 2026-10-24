@@ -1318,6 +1318,12 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(resident_plan_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(resident_plan_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME resident_plan_parity COMMAND resident_plan_parity)
+  # STRATA_VERIFY_PARTIAL_PLAN: the device's plan of a layer's VRAM groups and the host plan's copy and check against a
+  # host replay of the pool's plan (agreeing tables, the test hook's skew, a stale device table)
+  add_executable(partial_plan_parity src/kernels/partial_plan_parity.cpp)
+  target_include_directories(partial_plan_parity PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(partial_plan_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME partial_plan_parity COMMAND partial_plan_parity)
   # #783 PR-g: the multi-token hyper-connection read/write (exact-T projections under them) against the single-token calls
   add_executable(gr_multi_parity src/kernels/gr_multi_parity.cpp)
   target_include_directories(gr_multi_parity PRIVATE ${_strata_gpu_include_directories})

@@ -273,19 +273,28 @@ public:
     /// Every layer copies the token rows to the host (doorbell_publish), not only the layers with a routed expert
     /// outside the VRAM tier by the device's residency table: with windows in flight the adaptive tier marks an
     /// expert evicted on the host (the pool then computes it on the CPU) before the device table follows.  Also turns
-    /// the device-planned layers (E-6) off, which read the device table this mode lets lag.  Before the first window
-    /// (its graphs are captured there).
+    /// the device-planned layers (E-6) and STRATA_VERIFY_PARTIAL_PLAN off, which read the device table this mode lets
+    /// lag.  Before the first window (its graphs are captured there).
     void set_always_publish(bool on) {
         always_publish_ = on;
         if (on) device_plan_ = false;
+        if (on && partial_plan_) {
+            partial_plan_ = false;
+            std::fprintf(stderr, "strata verify: partial device plan (STRATA_VERIFY_PARTIAL_PLAN=1): off: windows in flight "
+                                 "publish every activation\n");
+        }
     }
     /// 0.1.43: the adaptive tier's overlap gate (see AdaptGate).  Refused (false) with the device-planned layers (E-6),
-    /// which never ask the host.  The pointer must outlive the verifier's windows.
+    /// which never ask the host, and with STRATA_VERIFY_PARTIAL_PLAN, whose VRAM groups do not wait for the host's
+    /// plan either (the gate holds that plan until the layer's copies have landed).  The pointer must outlive the
+    /// verifier's windows.
     bool set_adapt_gate(AdaptGate* g) {
-        if (g != nullptr && device_plan_) return false;
+        if (g != nullptr && (device_plan_ || partial_plan_)) return false;
         adapt_gate_ = g;
         return true;
     }
+    /// STRATA_VERIFY_PARTIAL_PLAN is on for this verifier's windows (decided in init).
+    bool partial_plan_on() const { return partial_plan_; }
     double ms_gate = 0;   ///< host time spent holding a layer's plan for the adaptive copies (decode timing prints it)
     cudaStream_t stream() const { return cs_; }
     int device() const { return device_; }
@@ -475,6 +484,18 @@ private:
     const int32_t* h_res_ = nullptr;      ///< the host residency table (VerifyHits::h_res)
     bool device_plan_ = false;            ///< E-6: resident-only layers planned on the device (STRATA_VERIFY_DEVICE_PLAN)
     uint32_t* skip_ = nullptr;            ///< E-6: per group, the ring whose plan the device built (0: the host's)
+    // STRATA_VERIFY_PARTIAL_PLAN: the VRAM groups from the device's table (partial_plan), on a branch of the window's
+    // graph that also copies the host's plan once flag A is up (wait_copy_plan); see record_window
+    bool partial_plan_ = false;
+    int32_t* pplan_ = nullptr;            ///< the device's plan of the VRAM groups (the plan block's layout, one group)
+    cudaStream_t pp_cs_ = nullptr;        ///< the branch
+    cudaEvent_t pp_fork_ = nullptr, pp_planned_ = nullptr, pp_hosted_ = nullptr;
+    uint32_t* h_pp_fix_ = nullptr; uint32_t* m_pp_fix_ = nullptr;   ///< layer-windows recomputed from the host's plan
+    uint32_t pp_fix_seen_ = 0;
+    int pp_fix_reports_ = 0;              ///< note_partial_plan's reports of a rise (the first 8)
+    int64_t pp_windows_ = 0;              ///< windows that ran with the partial plan
+    bool pp_used_[9] = {};                ///< per window size: its graph was captured with the partial plan
+    void note_partial_plan(int T);        ///< after a window: the first use and any recomputed layers, to the log
     unsigned* qcnt_ = nullptr;             ///< S26 STRATA_QFUSE: the HC read's q8_1 group counters (n_embd / 32)
     unsigned long long* slot_off_d_ = nullptr;   ///< E-6: the slot offsets on the device
     int64_t lb_ = 0, le_ = -1;           ///< set_stage: the layers this verifier runs (-1: to the last)

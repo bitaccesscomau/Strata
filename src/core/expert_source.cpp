@@ -6367,6 +6367,11 @@ ForesightSwap* foresight_swap_from_env(int64_t layers, int64_t experts, const st
                              "resident layers without the host)\n");
         return nullptr;
     }
+    if (const char* pp = std::getenv("STRATA_VERIFY_PARTIAL_PLAN"); pp && std::atoi(pp) != 0) {
+        std::fprintf(stderr, "strata serve: foresight swap: off beside STRATA_VERIFY_PARTIAL_PLAN (the device plans the VRAM "
+                             "groups from its residency table, which has no swap-space slots)\n");
+        return nullptr;
+    }
     auto* f = new ForesightSwap();
     auto env_int = [](const char* name, int def, int lo) { const char* e = std::getenv(name); const int x = e ? std::atoi(e) : def; return x < lo ? lo : x; };
     f->budget = env_int("STRATA_FS_BUDGET", 32, 1);

@@ -117,6 +117,22 @@ void copy_i32_from_mapped_unless(int32_t* dst, const int32_t* src, long long n, 
 void copy_or_zero_from_mapped(float* dst, const float* src, long long n, const uint32_t* skip, uint32_t value,
                               void* stream);
 
+// ---- STRATA_VERIFY_PARTIAL_PLAN: a layer's VRAM groups planned on the device whatever its other experts are
+/// resident_plan without the all-or-nothing rule: the entries whose expert the device's table holds in VRAM, planned
+/// as the host pool plans its VRAM groups (distinct experts in routing order, their entries ascending, from entry 0;
+/// counts[0] = groups, counts[1] = their entries, counts[2] = counts[3] = 0); every other entry is left to the host.
+/// `skew` > 0 is a test hook: an expert id divisible by it is treated as not resident (a lagging device table).
+void partial_plan(const int32_t* ids, int n_entries, int k, const int32_t* res_layer, int n_expert,
+                  const uint8_t* cache_base, const unsigned long long* slot_off, long long blob, int32_t* plan,
+                  long long capx, int skew, void* stream);
+/// Spin until *flag >= value, copy the host's plan (`src`, mapped, n_words) into `plan`, then compare its VRAM groups
+/// with the device's (`dev_plan`, partial_plan's).  Equal: counts[3] = counts[2] and nothing else changes.  Different:
+/// the plan is rewritten so that its PCIe groups come first (entries from 0) followed by its VRAM groups, counts[2] =
+/// both, counts[3] = the PCIe ones (what fetch_blobs / rebase_ptrs stage), so the PCIe call recomputes every GPU entry
+/// of the host's plan; *fixups (mapped, may be null) is then incremented.  capx <= 128.
+void wait_copy_plan(const uint32_t* flag, uint32_t value, int32_t* plan, const int32_t* src, long long n_words,
+                    const int32_t* dev_plan, long long capx, uint32_t* fixups, void* stream);
+
 /// Rows of the S2/S4/S8 embedding for T token ids read from DEVICE memory; out (T, n).  Bitwise `embedding_gather`.
 void embedding_gather_dev(const uint8_t* codes, const float* scales, const float* offsets, const int32_t* tokens,
                           int n_tok, int64_t n, int code_bits, int code_bias, int group_elems, uint64_t row_codes,

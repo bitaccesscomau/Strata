@@ -1494,6 +1494,196 @@ void copy_or_zero_from_mapped(float* dst, const float* src, long long n, const u
     check("copy_or_zero_from_mapped");
 }
 
+// ---- STRATA_VERIFY_PARTIAL_PLAN (see verify_kernels.hpp)
+namespace {
+// resident_plan_kernel's scan, with the entries of non-resident experts left out instead of the whole plan: a group
+// per distinct resident expert in order of first occurrence, its entries ascending - the host pool's VRAM groups.
+__global__ void __launch_bounds__(kResidentPlanMax) partial_plan_kernel(const int32_t* __restrict__ ids, int n, int k,
+                                    const int32_t* __restrict__ res, int n_expert, const uint8_t* cache_base,
+                                    const unsigned long long* slot_off, long long blob, int32_t* __restrict__ pl,
+                                    long long capx, int skew) {
+    __shared__ int32_t s_ids[kResidentPlanMax];
+    __shared__ int32_t s_excl[kResidentPlanMax];
+    __shared__ int32_t s_wsum[4];
+    const int tid = threadIdx.x;
+    int32_t eid = -1;
+    int32_t slot = -1;
+    if (tid < n) {
+        eid = ids[tid];
+        s_ids[tid] = eid;
+        slot = (eid >= 0 && eid < n_expert) ? res[eid] : -1;
+        if (skew > 0 && eid % skew == 0) slot = -1;   // test hook: the host plans this one
+    }
+    __syncthreads();
+    int first_j = tid;
+    int rank_in_group = 0;
+    int count_same = 0;
+    if (tid < n && slot >= 0) {   // every entry of an expert has the same slot: the group is all of them
+        for (int j = 0; j < n; ++j) {
+            if (s_ids[j] == eid) {
+                if (j < first_j) first_j = j;
+                if (j < tid) ++rank_in_group;
+                ++count_same;
+            }
+        }
+    }
+    const bool is_first = tid < n && slot >= 0 && first_j == tid;
+    const int my_pack = is_first ? ((count_same << 16) | 1) : 0;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    int pref = my_pack;
+#pragma unroll
+    for (int d = 1; d < 32; d <<= 1) {
+        const int up = __shfl_up_sync(0xffffffffu, pref, d);
+        if (lane >= d) pref += up;
+    }
+    s_excl[tid] = pref - my_pack;
+    if (lane == 31) s_wsum[warp] = pref;
+    __syncthreads();
+
+    int32_t* counts = pl;
+    int32_t* start = pl + 4;
+    int32_t* dst = start + capx + 1;
+    int32_t* tok = dst + capx;
+    const long long ptr_off = ((4 + (capx + 1) + 2 * capx) + 1) & ~1ll;
+    unsigned long long* ptr = (unsigned long long*) (pl + ptr_off);
+    int32_t* start2 = pl + ptr_off + 4 * capx;
+
+    if (is_first) {
+        int tot = s_excl[tid];
+#pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            if (w < warp) tot += s_wsum[w];
+        }
+        ptr[tot & 0xffff] = (unsigned long long) (cache_base + (slot_off ? (size_t) slot_off[slot] : (size_t) slot * (size_t) blob));
+        start[tot & 0xffff] = tot >> 16;
+    }
+    if (tid < n && slot >= 0) {
+        const int fj_warp = first_j >> 5;
+        int fj_tot = s_excl[first_j];
+#pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            if (w < fj_warp) fj_tot += s_wsum[w];
+        }
+        const int out_idx = (fj_tot >> 16) + rank_in_group;
+        dst[out_idx] = tid;
+        tok[out_idx] = tid / k;
+    }
+    if (tid == 0) {
+        const int total = s_wsum[0] + s_wsum[1] + s_wsum[2] + s_wsum[3];
+        const int groups = total & 0xffff, entries = total >> 16;
+        start[groups] = entries;
+        start2[0] = entries;
+        counts[0] = groups;
+        counts[1] = entries;
+        counts[2] = 0;
+        counts[3] = 0;
+    }
+}
+
+// The host's plan once its flag is up (flag A), compared with the device's VRAM groups; on a difference the PCIe call
+// is made to recompute every GPU entry of the host's plan (see verify_kernels.hpp).  One block of kResidentPlanMax
+// threads.
+__global__ void __launch_bounds__(kResidentPlanMax) wait_copy_plan_kernel(const volatile uint32_t* flag, uint32_t value,
+                                     int32_t* __restrict__ pl, const volatile int32_t* src, int n_words,
+                                     const int32_t* __restrict__ dev, long long capx, uint32_t* fixups) {
+    __shared__ int s_bad;
+    __shared__ int32_t s_dst[kResidentPlanMax], s_tok[kResidentPlanMax];
+    __shared__ int32_t s_start[kResidentPlanMax + 1], s_start2[kResidentPlanMax + 1];
+    __shared__ unsigned long long s_ptr[kResidentPlanMax];
+    const int tid = threadIdx.x;
+    if (tid == 0) {
+        while (*flag < value) strata_spin_pause();
+        __threadfence_system();
+        s_bad = 0;
+    }
+    __syncthreads();
+    for (int i = tid; i < n_words; i += blockDim.x) pl[i] = src[i];
+    __syncthreads();
+
+    int32_t* counts = pl;
+    int32_t* start = pl + 4;
+    int32_t* dst = start + capx + 1;
+    int32_t* tok = dst + capx;
+    const long long ptr_off = ((4 + (capx + 1) + 2 * capx) + 1) & ~1ll;
+    unsigned long long* ptr = (unsigned long long*) (pl + ptr_off);
+    unsigned long long* ptr2 = ptr + capx;
+    int32_t* start2 = pl + ptr_off + 4 * capx;
+    const int32_t* d_start = dev + 4;
+    const int32_t* d_dst = d_start + capx + 1;
+    const int32_t* d_tok = d_dst + capx;
+    const unsigned long long* d_ptr = (const unsigned long long*) (dev + ptr_off);
+
+    const int g0 = counts[0], e = counts[1], f = counts[2];
+    // the host writes a well-formed plan; anything else is left exactly as copied
+    const bool sane = g0 >= 0 && e >= 0 && f >= 0 && g0 + f <= capx && e <= capx && start[g0] >= 0 && start[g0] <= e;
+    const int e0 = sane ? start[g0] : 0;
+    int bad = 0;
+    if (sane) {
+        if (dev[0] != g0) bad = 1;
+        for (int i = tid; i <= g0 && !bad; i += blockDim.x) bad |= start[i] != d_start[i];
+        for (int i = tid; i < g0 && !bad; i += blockDim.x) bad |= ptr[i] != d_ptr[i];
+        for (int i = tid; i < e0 && !bad; i += blockDim.x) bad |= dst[i] != d_dst[i] || tok[i] != d_tok[i];
+    }
+    if (bad) atomicOr(&s_bad, 1);
+    __syncthreads();
+    if (s_bad == 0) {   // the device planned exactly the host's VRAM groups (always, while the two tables agree)
+        if (tid == 0) counts[3] = f;
+        return;
+    }
+    // [the PCIe groups, their entries from 0] then [the VRAM groups]: every GPU entry of the host's plan in the PCIe
+    // call, so what the device's plan computed is overwritten or unused.  The set of GPU rows (dst[0, e)) is the same.
+    for (int i = tid; i < e; i += blockDim.x) { s_dst[i] = dst[i]; s_tok[i] = tok[i]; }
+    for (int i = tid; i <= g0; i += blockDim.x) s_start[i] = start[i];
+    for (int i = tid; i <= f; i += blockDim.x) s_start2[i] = start2[i];
+    for (int i = tid; i < g0; i += blockDim.x) s_ptr[i] = ptr[i];
+    __syncthreads();
+    const int ep = e - e0;   // the PCIe groups' entries
+    for (int i = tid; i < e; i += blockDim.x) {
+        const int from = i < ep ? e0 + i : i - ep;
+        dst[i] = s_dst[from];
+        tok[i] = s_tok[from];
+    }
+    for (int i = tid; i <= f; i += blockDim.x) start2[i] = s_start2[i] - e0;
+    for (int i = tid; i < g0; i += blockDim.x) {
+        ptr2[f + i] = s_ptr[i];
+        start2[f + 1 + i] = ep + s_start[i + 1];
+    }
+    if (tid == 0) {
+        counts[0] = 0;
+        counts[2] = f + g0;
+        counts[3] = f;
+        if (fixups != nullptr) {   // one kernel at a time on the plan branch: no other writer
+            *(volatile uint32_t*) fixups = *(volatile uint32_t*) fixups + 1u;
+            __threadfence_system();
+        }
+    }
+}
+}  // namespace
+
+void partial_plan(const int32_t* ids, int n_entries, int k, const int32_t* res_layer, int n_expert,
+                  const uint8_t* cache_base, const unsigned long long* slot_off, long long blob, int32_t* plan,
+                  long long capx, int skew, void* stream) {
+    if (n_entries > kResidentPlanMax || capx > kResidentPlanMax) {
+        std::fprintf(stderr, "partial_plan: more than %d entries\n", kResidentPlanMax);
+        std::exit(1);
+    }
+    partial_plan_kernel<<<1, kResidentPlanMax, 0, (cudaStream_t) stream>>>(ids, n_entries, k, res_layer, n_expert,
+                                                                            cache_base, slot_off, blob, plan, capx, skew);
+    check("partial_plan");
+}
+
+void wait_copy_plan(const uint32_t* flag, uint32_t value, int32_t* plan, const int32_t* src, long long n_words,
+                    const int32_t* dev_plan, long long capx, uint32_t* fixups, void* stream) {
+    if (capx > kResidentPlanMax) {
+        std::fprintf(stderr, "wait_copy_plan: more than %d entries\n", kResidentPlanMax);
+        std::exit(1);
+    }
+    wait_copy_plan_kernel<<<1, kResidentPlanMax, 0, (cudaStream_t) stream>>>(
+        (const volatile uint32_t*) flag, value, plan, (const volatile int32_t*) src, (int) n_words, dev_plan, capx, fixups);
+    check("wait_copy_plan");
+}
+
 namespace {
 __global__ void wait_copy_i32_kernel(const volatile uint32_t* flag, uint32_t value, int32_t* __restrict__ dst,
                                      const volatile int32_t* src, int n) {
