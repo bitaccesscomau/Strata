@@ -338,7 +338,8 @@ bool conversation_checkpoint_queue(void* staging, void* staging_device, const Co
             }
             if (dspans != nullptr && dspans_cap >= want) {
                 const auto put = cudaMemcpyAsync(dspans, spans.data(), want, cudaMemcpyHostToDevice, stream);
-                if (put == cudaSuccess) gathered = strata::kernels::ckpt_gather(staging_device, dspans, spans.size(), stream);
+                if (put == cudaSuccess) gathered = strata::kernels::ckpt_gather(
+                    staging_device, static_cast<const strata::kernels::CkptGatherSpan*>(dspans), spans.size(), stream);
                 if (!gathered) (void) cudaStreamSynchronize(stream);   // the spans' copy may be queued
             }
             (void) cudaGetLastError();
