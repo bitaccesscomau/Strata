@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <limits>
 
 namespace strata::core {
@@ -244,6 +245,91 @@ bool conversation_checkpoint_copy(const SessionState& from, SessionState& to, co
     to.ple_prev[0] = tokens >= 2 ? ids[tokens - 2] : -1;
     to.ple_prev[1] = tokens >= 1 ? ids[tokens - 1] : -1;
     return true;
+}
+
+bool conversation_checkpoint_layout(const SessionState& ss, const ModelGeometry& g, size_t tokens,
+                                    ConversationCheckpointLayout& layout, std::string& error) {
+    ConversationStateSizes z;
+    if (!checkpoint_targets(ss, g, tokens, z, error)) return false;
+    ConversationCheckpointLayout l;
+    l.layers = owned_qsa(ss);
+    l.gdn = z.gdn;
+    l.ple = ss.ple_hist ? z.ple : 0;
+    l.tail = z.tail;
+    l.dead = z.dead;
+    l.block_pos = z.block_pos;
+    size_t tails = 0, dead = 0, positions = 0, at = 0;
+    if (!product(tails, {l.layers, l.tail}) || !product(dead, {l.layers, l.dead}) ||
+        !product(positions, {l.layers, l.block_pos})) return fail(error, "staging byte count overflow");
+    // the parts a window's run writes first, the GDN rows last, each on a 256-byte boundary
+    auto place = [&](size_t& offset, size_t bytes) {
+        offset = at;
+        return add(at, bytes) && add(at, (256 - at % 256) % 256);
+    };
+    if (!place(l.ple_at, l.ple) || !place(l.tails_at, tails) || !place(l.dead_at, dead) ||
+        !place(l.block_pos_at, positions) || !place(l.gdn_at, l.gdn)) return fail(error, "staging byte count overflow");
+    l.bytes = at;
+    layout = l;
+    return true;
+}
+
+bool conversation_checkpoint_queue(void* staging, const ConversationCheckpointLayout& l, const SessionState& ss,
+                                   cudaStream_t stream, cudaEvent_t small_done, std::string& error) {
+#if defined(STRATA_GPU_METAL)
+    (void) staging; (void) l; (void) ss; (void) stream; (void) small_done;
+    return fail(error, "no staged checkpoint copy on Metal");
+#else
+    if (!staging || !stream || !small_done) return fail(error, "missing staging buffer, stream or event");
+    if (l.layers != owned_qsa(ss) || (l.ple != 0) != (ss.ple_hist != nullptr))
+        return fail(error, "staging layout of another session carve");
+    uint8_t* image = static_cast<uint8_t*>(staging);
+    auto queue = [&](size_t at, const void* src, size_t bytes) -> bool {
+        if (!bytes) return true;
+        if (!src) return fail(error, "missing running-state buffer");
+        const auto status = cudaMemcpyAsync(image + at, src, bytes, cudaMemcpyDefault, stream);
+        if (status == cudaSuccess) return true;
+        error = std::string("conversation snapshot staged copy: ") + cudaGetErrorString(status);
+        return false;
+    };
+    if (!queue(l.ple_at, ss.ple_hist, l.ple)) return false;
+    for (size_t j = 0; j < l.layers; ++j) {
+        const auto& st = owned(ss, j);
+        if (!queue(l.tails_at + j * l.tail, st.idx_tail, l.tail) || !queue(l.dead_at + j * l.dead, st.idx_dead, l.dead) ||
+            !queue(l.block_pos_at + j * l.block_pos, st.idx_block_pos, l.block_pos)) return false;
+    }
+    const auto recorded = cudaEventRecord(small_done, stream);
+    if (recorded != cudaSuccess) {
+        error = std::string("conversation snapshot staged copy event: ") + cudaGetErrorString(recorded);
+        return false;
+    }
+    return queue(l.gdn_at, ss.gdn_state, l.gdn);
+#endif
+}
+
+void conversation_checkpoint_unstage(ConversationCheckpoint& c, const void* staging,
+                                     const ConversationCheckpointLayout& l, bool gdn_rows) {
+    c.gdn.resize(l.gdn);
+    c.ple.resize(l.ple);
+    c.tails.resize(l.layers * l.tail);
+    c.dead.resize(l.layers * l.dead);
+    c.block_pos.resize(l.layers * l.block_pos);
+    const uint8_t* image = static_cast<const uint8_t*>(staging);
+    // in 16 MiB slices, each one a beat (#2049: a pooled checkpoint's pages may have to come back from the drive)
+    auto take = [&](std::vector<uint8_t>& to, size_t at) {
+        const size_t step = (size_t) 16 << 20;
+        for (size_t done = 0; done < to.size(); done += step) {
+            std::memcpy(to.data() + done, image + at + done, std::min(step, to.size() - done));
+            core::progress_beat();
+        }
+    };
+    if (gdn_rows) {
+        take(c.gdn, l.gdn_at);
+        return;
+    }
+    take(c.ple, l.ple_at);
+    take(c.tails, l.tails_at);
+    take(c.dead, l.dead_at);
+    take(c.block_pos, l.block_pos_at);
 }
 
 bool conversation_snapshot_bytes(const ConversationView& view, const SessionState& ss,

@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -299,6 +300,64 @@ void full_session(int fmt, int mode, int experts) {
     cuda_check(cudaMemcpy(spare.data(),main.state.idx_pooled,sizes.dead,cudaMemcpyDeviceToHost));
     check(spare==a.checkpoints[0].dead,"checkpoint rebuilds spare row over a later completed block");
     check(ss.ple_prev[0]==2 && ss.ple_prev[1]==3,"checkpoint PLE token window");
+    {
+        // STRATA_CKPT_ASYNC: the running state through a pinned staging image into the vectors is the synchronous save,
+        // byte for byte, into fresh vectors and into a pooled checkpoint's stale ones; writers ordered after the events
+        // the serve loop waits for (the small parts', then the GDN rows') do not reach the image
+        fill(77);
+        const std::vector<int32_t> head(ids.begin(),ids.begin()+3);
+        ConversationCheckpointLayout lay;
+        check(conversation_checkpoint_layout(ss,g,head.size(),lay,err),"staging layout");
+        check(lay.bytes>=sizes.gdn+sizes.ple+lay.layers*(sizes.tail+sizes.dead+sizes.block_pos) && lay.gdn_at>lay.block_pos_at &&
+              lay.gdn_at%256==0,"the image holds every part, the GDN rows last");
+        ConversationCheckpointLayout too_long;
+        check(!conversation_checkpoint_layout(ss,g,(size_t)ss.max_cells+1,too_long,err),"a checkpoint past the session's cells is refused");
+        ConversationCheckpoint want;
+        want.ids=head;
+        check(conversation_checkpoint_save(want,ss,g,err),"synchronous reference save");
+        void* staging=nullptr;
+        cuda_check(cudaHostAlloc(&staging,lay.bytes,cudaHostAllocDefault));
+        std::memset(staging,0xA5,lay.bytes);
+        cudaStream_t copy=nullptr,writer=nullptr;
+        cudaEvent_t small_done=nullptr,gdn_done=nullptr;
+        cuda_check(cudaStreamCreateWithFlags(&copy,cudaStreamNonBlocking));
+        cuda_check(cudaStreamCreateWithFlags(&writer,cudaStreamNonBlocking));
+        cuda_check(cudaEventCreateWithFlags(&small_done,cudaEventDisableTiming));
+        cuda_check(cudaEventCreateWithFlags(&gdn_done,cudaEventDisableTiming));
+        check(conversation_checkpoint_queue(staging,lay,ss,copy,small_done,err),"queue the staged copies");
+        cuda_check(cudaEventRecord(gdn_done,copy));
+        // what a window's run writes, after the small parts; what a commit writes, after the GDN rows
+        cuda_check(cudaStreamWaitEvent(writer,small_done,0));
+        cuda_check(cudaMemsetAsync(main.state.idx_tail,0x3C,sizes.tail,writer));
+        cuda_check(cudaMemsetAsync(ss.ple_hist,0x3C,sizes.ple,writer));
+        cuda_check(cudaStreamWaitEvent(writer,gdn_done,0));
+        cuda_check(cudaMemsetAsync(ss.gdn_state,0x3C,sizes.gdn,writer));
+        cuda_check(cudaEventSynchronize(small_done));
+        ConversationCheckpoint fresh,pooled;
+        fresh.ids=pooled.ids=head;
+        pooled.gdn.assign(sizes.gdn,0x5A); pooled.ple.assign(sizes.ple,0x5A); pooled.tails.assign(lay.layers*sizes.tail,0x5A);
+        pooled.dead.assign(lay.layers*sizes.dead,0x5A); pooled.block_pos.assign(lay.layers*sizes.block_pos,0x5A);
+        conversation_checkpoint_unstage(fresh,staging,lay,false);
+        conversation_checkpoint_unstage(pooled,staging,lay,false);
+        cuda_check(cudaEventSynchronize(gdn_done));
+        conversation_checkpoint_unstage(fresh,staging,lay,true);
+        conversation_checkpoint_unstage(pooled,staging,lay,true);
+        auto same=[&](const ConversationCheckpoint& x) {
+            return x.gdn==want.gdn && x.ple==want.ple && x.tails==want.tails && x.dead==want.dead && x.block_pos==want.block_pos;
+        };
+        check(same(fresh),"staged checkpoint equals the synchronous save");
+        check(same(pooled),"staged into a pooled checkpoint's vectors: every byte overwritten");
+        check(conversation_checkpoint_validate(fresh,ss,g,err),"staged checkpoint validates");
+        cuda_check(cudaStreamSynchronize(writer));
+        fill(201);
+        check(conversation_checkpoint_restore(fresh,ss,g,err),"restore the staged checkpoint");
+        ConversationCheckpoint back;
+        back.ids=head;
+        check(conversation_checkpoint_save(back,ss,g,err) && same(back),"a restored staged checkpoint reads back as the reference");
+        cuda_check(cudaEventDestroy(gdn_done)); cuda_check(cudaEventDestroy(small_done));
+        cuda_check(cudaStreamDestroy(writer)); cuda_check(cudaStreamDestroy(copy));
+        cuda_check(cudaFreeHost(staging));
+    }
 }
 }
 
