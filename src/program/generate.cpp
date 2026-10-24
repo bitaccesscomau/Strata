@@ -11176,6 +11176,13 @@ int main(int argc, char** argv) {
         else if (use_mtp && mtp.max_t() > S_mtp) mtp.set_max_drafts(S_mtp - 1);
         strata::spec::SuffixDrafter sfx(std::max(1, o.suffix_draft), 64, (size_t) o.max_context + 4096);
         strata::spec::DraftPolicy policy(S);   // MTP or lookup window, learned over the whole process
+        // STRATA_SUFFIX_LONG_MIN=<n> (default 12): the match length from which a lookup the MTP-first rule refuses is
+        // counted on the request's "lookup gate" line (a lookup draft is offered only when its first token is the MTP's)
+        static const int sfx_long_min = [] {
+            const char* v = std::getenv("STRATA_SUFFIX_LONG_MIN");
+            const int n = v != nullptr ? std::atoi(v) : 0;
+            return n > 0 ? std::clamp(n, 3, 64) : 12;
+        }();
         const bool spec_cost = [] { const char* v = std::getenv("STRATA_SPEC_COST"); return v != nullptr && v[0] == '1'; }();   // cost-aware MTP window (A/B arm)
         strata::spec::DraftPolicy::ChainState chain_st;
         int chain_rows = 1;   // the window the cost-aware rule kept in the MTP chain just drafted
@@ -14183,6 +14190,9 @@ int main(int argc, char** argv) {
             }
             bool first_window = true;
             int64_t produced_n = 0, sfx_windows = 0, sfx_drafts = 0, sfx_ok = 0;
+            // the MTP-first rule's refusals: windows whose lookup matched sfx_long_min+ tokens and proposed another first
+            // token than the MTP's first draft, and how many of those first tokens the window verified (log only)
+            int64_t sfx_gated = 0, sfx_gated_held = 0;
             int64_t chain_windows = 0, chain_drafts = 0, chain_ok = 0;   // --lookup-chain's own counts
             int64_t t2_rej[8] = {}, t2_hit[8] = {};   // STRATA_MTP_TOP2: rejections inside the MTP drafts by depth, runner-up hits
             int64_t dp_tested[8] = {}, dp_ok[8] = {};   // STRATA_SPEC_DEPTH=1: MTP drafts tested / accepted by depth
@@ -14893,12 +14903,16 @@ int main(int argc, char** argv) {
                 // when its expected tokens per ms, from the measured acceptance and window costs, beat the MTP window's
                 bool from_sfx = false;
                 int sfx_match = 0;
+                int32_t gated_first = -1;   // a long lookup the rule below refused: its first token, scored after the window
                 if (o.suffix_draft > 0 && !first_window) {
                     const int k = sfx.propose(S - 1, sbuf.data());
                     sfx_match = sfx.last_match();
                     if (k > 0 && (!use_mtp || sbuf[0] == drafts[0])) {
                         const strata::spec::DraftPolicy::Pick pk = policy.choose(T, k, sfx_match);
                         if (pk.lookup) { T = pk.t; from_sfx = true; }
+                    } else if (k > 0 && sfx_match >= sfx_long_min) {   // the MTP's first draft is another token
+                        ++sfx_gated;
+                        gated_first = sbuf[0];
                     }
                 }
                 // --lookup-chain: what followed an earlier occurrence of the context + the MTP's drafts, after them
@@ -15108,6 +15122,7 @@ int main(int argc, char** argv) {
                 int a = merged ? T - 1 : 0;   // a merged window commits every row, as the prompt windows do
                 while (a < T - 1 && window[(size_t) a + 1] == outv[(size_t) a]) ++a;
                 if (from_sfx) { ++sfx_windows; sfx_drafts += T - 1; sfx_ok += a; }
+                if (gated_first >= 0 && outv[0] == gated_first) ++sfx_gated_held;   // row 0's output is the next token
                 if (chain_n > 0) { ++chain_windows; chain_drafts += chain_n; chain_ok += std::max(0, a - (T_mtp - 1)); }
                 if (!from_sfx && !first_window)
                     for (int d = 0; d < T_mtp - 1 && d < 8 && d <= a; ++d) { ++dp_tested[d]; dp_ok[d] += d < a; }
@@ -15650,6 +15665,10 @@ int main(int argc, char** argv) {
             if (sfx_windows > 0)
                 std::fprintf(stderr, "strata serve: suffix drafts: %lld windows, %lld of %lld drafts accepted\n",
                              (long long) sfx_windows, (long long) sfx_ok, (long long) sfx_drafts);
+            if (sfx_gated > 0)
+                std::fprintf(stderr, "strata serve: lookup gate: %lld windows had a %d+ match with a different first token, "
+                                     "%lld of them held / %lld decode windows\n", (long long) sfx_gated, sfx_long_min,
+                             (long long) sfx_gated_held, (long long) dec_windows);
             if (o.lookup_chain > 0)
                 std::fprintf(stderr, "strata serve: lookup chain: %lld of %lld windows, %lld of %lld chained drafts accepted\n",
                              (long long) chain_windows, (long long) dec_windows, (long long) chain_ok, (long long) chain_drafts);

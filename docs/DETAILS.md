@@ -150,6 +150,12 @@ suffix/prompt-lookup drafter only (or one token per round), every token is still
 draft layer's VRAM (~0.7-1 GiB with its head) goes to the expert cache: 1,000 -> 1,678 slots in one A/B on an 8 GB
 card. The conversation cache (`--conversation-cache-mib`) stays on: a parked conversation then carries no draft K/V.
 
+**Long prompt-lookup matches the draft layer refuses (the `lookup gate` line):** a prompt-lookup window is verified
+only when its first token is the draft layer's first draft. A request with lookups of 12 or more matched tokens
+(`STRATA_SUFFIX_LONG_MIN=<n>`, 3 to 64) that proposed another first token logs `strata serve: lookup gate: N windows
+had a 12+ match with a different first token, H of them held / W decode windows` (H: the lookup's first token was the
+one the window verified). It only counts; nothing is verified differently.
+
 **Low-RAM mode (engine 0.1.26, chosen by setup):** normally all of a model's experts are copied into RAM (23-50 GB,
 pinned) and the GPU holds a copy of the most-used ones. On a PC whose RAM cannot hold them beside the system (the
 experts plus ~10 GB), setup instead maps them from one file in the model's folder (`--mmap-experts`, the pack's
