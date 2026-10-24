@@ -27,14 +27,12 @@ talks to it over stdin/stdout; `MockEngine` is a scripted stand-in that makes ev
 from __future__ import annotations
 
 import argparse
-import array
 import contextlib
 import collections
 import base64
 import hashlib
 import hmac
 import codecs
-import itertools
 import ctypes
 import json
 import math
@@ -978,8 +976,8 @@ class IdText:
 
     def __init__(self, keep: int = 4):
         self.keep = keep
-        # (ids, text, digits): digits[i] = the characters of ids[:i]'s text without its commas (len(ids) + 1 entries)
-        self.entries: list[tuple[list, str, array.array]] = []
+        # (ids, text, lens): lens[i] = the characters of ids[i]'s text, one byte each
+        self.entries: list[tuple[list, str, bytes]] = []
         self.lock = threading.Lock()
 
     @classmethod
@@ -1010,17 +1008,20 @@ class IdText:
             src, n = None, 0
             parts = [str(int(t)) for t in ids]
             text = ",".join(parts)
-            digits = array.array("q", itertools.accumulate(map(len, parts), initial=0))
         else:
             parts = [str(int(t)) for t in ids[n:]]
-            head = src[1][:src[2][n] + n - 1]
+            head = src[1][:sum(src[2][:n]) + n - 1]
             text = "".join((head, ",", ",".join(parts))) if parts else head
-            digits = src[2][:n + 1]
-            digits.extend(itertools.islice(itertools.accumulate(map(len, parts), initial=digits[n]), 1, None))
+        try:
+            lens = bytes(map(len, parts))
+        except ValueError:                  # an id of 256 digits or more: sent, not kept
+            return text, n
+        if src is not None:
+            lens = src[2][:n] + lens
         # one kept line per conversation: a line replaces the one it goes on from (more than half of it reused)
         old = src if src is not None and 2 * n > len(src[0]) else None
         with self.lock:
-            self.entries = [(ids, text, digits)] + [e for e in self.entries if e is not old][:self.keep - 1]
+            self.entries = [(ids, text, lens)] + [e for e in self.entries if e is not old][:self.keep - 1]
         return text, n
 
 

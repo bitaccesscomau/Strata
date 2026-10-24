@@ -146,6 +146,16 @@ class Lines(unittest.TestCase):
         ids.append(7)
         self.assertEqual(cache.text(ids), (full_line(ids), 50))
 
+    def test_an_id_too_long_to_keep(self):
+        """An id of 256 digits or more (never a real one) is sent as it is and its line is not kept."""
+        cache = small()
+        ids = list(range(1000, 1100))
+        cache.text(ids)
+        big = ids + [10 ** 300]
+        self.assertEqual(cache.text(big), (full_line(big), 100))
+        self.assertEqual(len(cache.entries), 1)
+        self.assertEqual(cache.text(ids + [1]), (full_line(ids + [1]), 100))
+
     def test_a_merge_across_the_old_end(self):
         """The text grew but its last ids did not stay: "hello wor" + "ld" is not the ids of "hello wor" + more."""
         got = the_pack()
