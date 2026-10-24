@@ -1852,7 +1852,8 @@ public:
         void* p = nullptr;
         cudaStream_t s = nullptr;
         cudaEvent_t a = nullptr, b = nullptr;
-        if (e == cudaSuccess) e = cudaHostAlloc(&p, bytes, cudaHostAllocDefault);
+        // mapped: the small parts of the running state are gathered into the image by one kernel (13 copies cost 70 ms)
+        if (e == cudaSuccess) e = cudaHostAlloc(&p, bytes, cudaHostAllocDefault | cudaHostAllocMapped);
         if (e == cudaSuccess) e = cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
         if (e == cudaSuccess) e = cudaEventCreateWithFlags(&a, cudaEventDisableTiming);
         if (e == cudaSuccess) e = cudaEventCreateWithFlags(&b, cudaEventDisableTiming);
@@ -1867,6 +1868,10 @@ public:
         }
         dev_ = dev;
         stage_ = p;
+        if (cudaHostGetDevicePointer(&stage_dev_, p, 0) != cudaSuccess) {   // (no device address: one copy per part)
+            stage_dev_ = nullptr;
+            (void) cudaGetLastError();
+        }
         cap_ = bytes;
         stream_ = s;
         small_ev_ = a;
@@ -1888,7 +1893,7 @@ public:
         const strata::core::OnDevice on(dev_);
         t_begin_ = Clock::now();
         cudaError_t e = cudaSuccess;
-        if (!strata::core::conversation_checkpoint_queue(stage_, lay, ss, stream_, small_ev_, why) ||
+        if (!strata::core::conversation_checkpoint_queue(stage_, stage_dev_, lay, ss, stream_, small_ev_, why) ||
             (e = cudaEventRecord(gdn_ev_, stream_)) != cudaSuccess ||
             (e = cudaEventSynchronize(small_ev_)) != cudaSuccess) {   // what a window's run writes is out
             if (e != cudaSuccess) why = cudaGetErrorString(e);
@@ -2021,6 +2026,7 @@ private:
     }
     int dev_ = -1;
     void* stage_ = nullptr;
+    void* stage_dev_ = nullptr;   // the image's device address (mapped), null: copies per part
     size_t cap_ = 0;
     cudaStream_t stream_ = nullptr;
     cudaEvent_t small_ev_ = nullptr, gdn_ev_ = nullptr;

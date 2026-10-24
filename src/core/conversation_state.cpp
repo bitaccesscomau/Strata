@@ -1,6 +1,9 @@
 #include "strata/core/conversation_snapshot.hpp"
 #include "conversation_checked.hpp"
 #include "conversation_copy.hpp"
+#if !defined(STRATA_GPU_METAL)
+#include "strata/kernels/verify_kernels.hpp"   // STRATA_CKPT_ASYNC's gather kernel (CUDA and HIP)
+#endif
 
 #include <algorithm>
 #include <array>
@@ -273,10 +276,11 @@ bool conversation_checkpoint_layout(const SessionState& ss, const ModelGeometry&
     return true;
 }
 
-bool conversation_checkpoint_queue(void* staging, const ConversationCheckpointLayout& l, const SessionState& ss,
-                                   cudaStream_t stream, cudaEvent_t small_done, std::string& error) {
+bool conversation_checkpoint_queue(void* staging, void* staging_device, const ConversationCheckpointLayout& l,
+                                   const SessionState& ss, cudaStream_t stream, cudaEvent_t small_done,
+                                   std::string& error) {
 #if defined(STRATA_GPU_METAL)
-    (void) staging; (void) l; (void) ss; (void) stream; (void) small_done;
+    (void) staging; (void) staging_device; (void) l; (void) ss; (void) stream; (void) small_done;
     return fail(error, "no staged checkpoint copy on Metal");
 #else
     if (!staging || !stream || !small_done) return fail(error, "missing staging buffer, stream or event");
@@ -291,12 +295,56 @@ bool conversation_checkpoint_queue(void* staging, const ConversationCheckpointLa
         error = std::string("conversation snapshot staged copy: ") + cudaGetErrorString(status);
         return false;
     };
-    if (!queue(l.ple_at, ss.ple_hist, l.ple)) return false;
-    for (size_t j = 0; j < l.layers; ++j) {
-        const auto& st = owned(ss, j);
-        if (!queue(l.tails_at + j * l.tail, st.idx_tail, l.tail) || !queue(l.dead_at + j * l.dead, st.idx_dead, l.dead) ||
-            !queue(l.block_pos_at + j * l.block_pos, st.idx_block_pos, l.block_pos)) return false;
+    auto queue_small = [&]() -> bool {   // one copy per allocation (a driver that refused the gather kernel)
+        if (!queue(l.ple_at, ss.ple_hist, l.ple)) return false;
+        for (size_t j = 0; j < l.layers; ++j) {
+            const auto& st = owned(ss, j);
+            if (!queue(l.tails_at + j * l.tail, st.idx_tail, l.tail) ||
+                !queue(l.dead_at + j * l.dead, st.idx_dead, l.dead) ||
+                !queue(l.block_pos_at + j * l.block_pos, st.idx_block_pos, l.block_pos)) return false;
+        }
+        return true;
+    };
+    // the parts a window's run writes, in one gather kernel: a copy per allocation costs more than the bytes (about
+    // 2 ms each on the RTX 3090, 70 ms for the 13 small parts, against 10 ms for the 112 MB of GDN rows)
+    bool gathered = false;
+    if (staging_device != nullptr) {
+        std::vector<strata::kernels::CkptGatherSpan> spans;
+        spans.reserve(1 + 3 * l.layers);
+        auto span = [&](size_t at, const void* src, size_t bytes) {
+            if (bytes && src) spans.push_back({src, at, bytes});
+        };
+        span(l.ple_at, ss.ple_hist, l.ple);
+        for (size_t j = 0; j < l.layers; ++j) {
+            const auto& st = owned(ss, j);
+            span(l.tails_at + j * l.tail, st.idx_tail, l.tail);
+            span(l.dead_at + j * l.dead, st.idx_dead, l.dead);
+            span(l.block_pos_at + j * l.block_pos, st.idx_block_pos, l.block_pos);
+        }
+        if (!spans.empty()) {
+            // the spans' device image: allocated on first use and kept (a free would synchronize the device)
+            static void* dspans = nullptr;
+            static size_t dspans_cap = 0;
+            const size_t want = spans.size() * sizeof(spans[0]);
+            if (want > dspans_cap) {
+                void* grown = nullptr;
+                if (cudaMalloc(&grown, want) == cudaSuccess) {
+                    if (dspans != nullptr) (void) cudaFree(dspans);
+                    dspans = grown;
+                    dspans_cap = want;
+                } else {
+                    (void) cudaGetLastError();
+                }
+            }
+            if (dspans != nullptr && dspans_cap >= want) {
+                const auto put = cudaMemcpyAsync(dspans, spans.data(), want, cudaMemcpyHostToDevice, stream);
+                if (put == cudaSuccess) gathered = strata::kernels::ckpt_gather(staging_device, dspans, spans.size(), stream);
+                if (!gathered) (void) cudaStreamSynchronize(stream);   // the spans' copy may be queued
+            }
+            (void) cudaGetLastError();
+        }
     }
+    if (!gathered && !queue_small()) return false;
     const auto recorded = cudaEventRecord(small_done, stream);
     if (recorded != cudaSuccess) {
         error = std::string("conversation snapshot staged copy event: ") + cudaGetErrorString(recorded);

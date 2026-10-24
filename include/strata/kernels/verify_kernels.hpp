@@ -20,6 +20,17 @@ namespace strata::kernels {
 
 inline constexpr int kVerifyMaxT = 8;
 
+/// STRATA_CKPT_ASYNC: one region of a checkpoint's running state copied into a staging image.  `dst_at` is the offset in
+/// the image; the image is host memory the device may write (cudaHostAllocMapped, cudaHostGetDevicePointer).
+struct CkptGatherSpan {
+    const void* src = nullptr;
+    size_t dst_at = 0;
+    size_t bytes = 0;
+};
+/// image <- every span, one block per span, on `stream` (device pointers: the spans' `src` and the image's device
+/// address).  False: nothing ran (the caller copies span by span instead).
+bool ckpt_gather(void* image_device, const CkptGatherSpan* spans_device, size_t n, void* stream);
+
 /// For token t of T: conv over [history(3) | qkv_0 .. qkv_t] -> SiLU -> L2 norm of the q/k heads -> h[t].
 /// `history` is NOT written, but with `commit` (one token): it then keeps the token, as gdn_conv_commit.  Bitwise
 /// `fused_gdn_conv_l2` per token.

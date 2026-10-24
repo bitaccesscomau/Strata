@@ -94,9 +94,12 @@ bool conversation_checkpoint_layout(const SessionState& session, const ModelGeom
 /// Queues the copies of the running state into `staging` (layout.bytes) on `stream`: the small parts, then
 /// `small_done` is recorded, then the GDN rows.  Nothing waits.  The caller has synchronized the device, records its
 /// own event for the GDN rows after this, and keeps every writer of the state behind the copies: a window's run
-/// behind `small_done`, a commit or a one-token window behind the GDN rows.
-bool conversation_checkpoint_queue(void* staging, const ConversationCheckpointLayout& layout, const SessionState& session,
-                                   cudaStream_t stream, cudaEvent_t small_done, std::string& error);
+/// behind `small_done`, a commit or a one-token window behind the GDN rows.  `staging_device` is the same image's
+/// device address (cudaHostGetDevicePointer): the small parts are gathered into it by one kernel, because a copy per
+/// allocation costs more than the bytes.
+bool conversation_checkpoint_queue(void* staging, void* staging_device, const ConversationCheckpointLayout& layout,
+                                   const SessionState& session, cudaStream_t stream, cudaEvent_t small_done,
+                                   std::string& error);
 /// Host only, no CUDA call: sizes the checkpoint's vectors as conversation_checkpoint_save does (a pooled checkpoint's
 /// already are: nothing is filled) and copies in the small parts of a staging image the queue's copies have filled,
 /// or with `gdn_rows` the GDN rows.  Every byte of each part's vector is overwritten.

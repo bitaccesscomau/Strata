@@ -316,7 +316,9 @@ void full_session(int fmt, int mode, int experts) {
         want.ids=head;
         check(conversation_checkpoint_save(want,ss,g,err),"synchronous reference save");
         void* staging=nullptr;
-        cuda_check(cudaHostAlloc(&staging,lay.bytes,cudaHostAllocDefault));
+        cuda_check(cudaHostAlloc(&staging,lay.bytes,cudaHostAllocDefault|cudaHostAllocMapped));
+        void* staging_dev=nullptr;
+        cuda_check(cudaHostGetDevicePointer(&staging_dev,staging,0));
         std::memset(staging,0xA5,lay.bytes);
         cudaStream_t copy=nullptr,writer=nullptr;
         cudaEvent_t small_done=nullptr,gdn_done=nullptr;
@@ -324,7 +326,7 @@ void full_session(int fmt, int mode, int experts) {
         cuda_check(cudaStreamCreateWithFlags(&writer,cudaStreamNonBlocking));
         cuda_check(cudaEventCreateWithFlags(&small_done,cudaEventDisableTiming));
         cuda_check(cudaEventCreateWithFlags(&gdn_done,cudaEventDisableTiming));
-        check(conversation_checkpoint_queue(staging,lay,ss,copy,small_done,err),"queue the staged copies");
+        check(conversation_checkpoint_queue(staging,staging_dev,lay,ss,copy,small_done,err),"queue the staged copies (gathered)");
         cuda_check(cudaEventRecord(gdn_done,copy));
         // what a window's run writes, after the small parts; what a commit writes, after the GDN rows
         cuda_check(cudaStreamWaitEvent(writer,small_done,0));
@@ -346,6 +348,19 @@ void full_session(int fmt, int mode, int experts) {
             return x.gdn==want.gdn && x.ple==want.ple && x.tails==want.tails && x.dead==want.dead && x.block_pos==want.block_pos;
         };
         check(same(fresh),"staged checkpoint equals the synchronous save");
+        {   // the same image copied part by part (a driver that refused the gather kernel): the same bytes
+            void* fallback=nullptr;
+            cuda_check(cudaHostAlloc(&fallback,lay.bytes,cudaHostAllocDefault));
+            ConversationCheckpoint copy_by_copy; copy_by_copy.ids=head;
+            check(conversation_checkpoint_queue(fallback,nullptr,lay,ss,copy,small_done,err),"queue the copies part by part");
+            cuda_check(cudaEventRecord(gdn_done,copy));
+            cuda_check(cudaEventSynchronize(small_done));
+            conversation_checkpoint_unstage(copy_by_copy,fallback,lay,false);
+            cuda_check(cudaEventSynchronize(gdn_done));
+            conversation_checkpoint_unstage(copy_by_copy,fallback,lay,true);
+            check(same(copy_by_copy),"the part-by-part copies give the same checkpoint");
+            cuda_check(cudaFreeHost(fallback));
+        }
         check(same(pooled),"staged into a pooled checkpoint's vectors: every byte overwritten");
         check(conversation_checkpoint_validate(fresh,ss,g,err),"staged checkpoint validates");
         cuda_check(cudaStreamSynchronize(writer));
