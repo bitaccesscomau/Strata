@@ -2528,6 +2528,13 @@ unless noted; the gain is small on these two cards and larger on the Turing card
 sm_86 as well as sm_61: bit-exact, and the time to the first token of a 150 / 300 / 450-token prompt fell 11-15% on the RTX 3060 and 6-10% on the RTX A4000 (5 of 5 pairs each).
 `STRATA_DEQUANT_WIDE=0` turns it off.
 
+`STRATA_SELECT_TWO_PASS=1` (not measured yet; sm_80+, the prompt path's tensor-core block scorer): every block is scored once in
+single-pass TF32 with a per-block error bound, and again in the usual 3xTF32 only where the bound reaches the query's top-k
+cut-off (a query the bound cannot settle has its 16-query tile scored again in full), so the selected cells, their order and
+the ties are exactly the 3xTF32 scorer's (the bound and the rule: `include/strata/kernels/qsa_two_pass.hpp`). Calls whose last
+query has `STRATA_SELECT_TWO_PASS_MIN` blocks or more take it (default 4096, 16K cells). `STRATA_SELECT_TWO_PASS_CHECK=1` (a slow
+diagnostic) runs the 3xTF32 scorer beside it and prints, after each prompt, the queries whose ids differ (must be 0).
+
 ### RTX 20 (Turing, sm_75) kernel series (opt-in, 0.1.45)
 
 Kernels by rafatxf (#2069-#2072, #2093, #2220-#2222), imanu86 (#2081) and xrip (#1821) for compute capability 7.5. They were measured
