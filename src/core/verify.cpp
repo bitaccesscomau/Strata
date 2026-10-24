@@ -1195,8 +1195,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     };
     bool sg_gated_[2] = {false, false};   // per group: the combine applies the shared gate
     if (!batch_rec_) groups_[T] = G;
-    // STRATA_VERIFY_PARTIAL_PLAN (see init): a window of one group, not a batch window
-    const bool pp = partial_plan_ && G == 1 && !batch_rec_;
+    // STRATA_VERIFY_PARTIAL_PLAN (see init): a window of one group, not a batch window, none of the modes init turns
+    // it off for (checked again here: they all read the plan where the partial plan does not wait for it)
+    const bool pp = partial_plan_ && G == 1 && !batch_rec_ && !device_plan_ && !always_publish_ && remote_opt_ == nullptr &&
+                    m_bal_ == nullptr;
     if (!batch_rec_) pp_used_[T] = pp;
     // test hook (STRATA_TEST_PARTIAL_PLAN_SKEW=N): the device's plan leaves out every expert id divisible by N, as a
     // device table lagging the host's would, so every such layer takes wait_copy_plan's recompute
@@ -3414,9 +3416,10 @@ void Verifier::publish_plan(void* ctx) {
     *(volatile uint32_t*) v->h_flagA_ = v->cur_layer_ + 1;
 }
 
-// STRATA_VERIFY_PARTIAL_PLAN, after a window's sync: the log shows that it ran (the first window) and each time
-// wait_copy_plan had to recompute layers from the host's plan (the device's residency table differed from the host's;
-// none is expected while the host's changes reach the device before every window).  `h_pp_fix_` only grows.
+// STRATA_VERIFY_PARTIAL_PLAN, after a window's sync: the log shows that it ran (the first window), how many layer-windows
+// wait_copy_plan had to recompute from the host's plan at windows 16, 32, 64, ... (the device's residency table differed
+// from the host's; none is expected while the host's changes reach the device before every window), and the first few
+// windows where that count rose.  `h_pp_fix_` only grows.
 void Verifier::note_partial_plan(int T) {
     if (h_pp_fix_ == nullptr) return;
     ++pp_windows_;
@@ -3424,16 +3427,14 @@ void Verifier::note_partial_plan(int T) {
         std::fprintf(stderr, "strata verify: partial device plan: first window ran (%d tokens, layers %lld-%lld planned on "
                              "the device)\n", T, (long long) lb_, (long long) le_ - 1);
     const uint32_t fix = *(volatile uint32_t*) h_pp_fix_;
-    if (fix != pp_fix_seen_) {
-        static std::atomic<int> reports{0};   // the first few, then one a 1024 windows
-        if (reports.load() < 8 || (pp_windows_ & 1023) == 0) {
-            reports.fetch_add(1);
-            std::fprintf(stderr, "strata verify: partial device plan: %u layer-windows recomputed from the host's plan in "
-                                 "%lld windows (the device's residency table differed from the host's)\n",
-                         fix, (long long) pp_windows_);
-        }
-        pp_fix_seen_ = fix;
+    const bool rose = fix != pp_fix_seen_ && pp_fix_reports_ < 8;
+    if (rose || (pp_windows_ >= 16 && (pp_windows_ & (pp_windows_ - 1)) == 0)) {
+        if (rose) ++pp_fix_reports_;
+        std::fprintf(stderr, "strata verify: partial device plan: %lld windows, %u layer-windows recomputed from the host's "
+                             "plan (the device's residency table differed from the host's)\n",
+                     (long long) pp_windows_, fix);
     }
+    pp_fix_seen_ = fix;
 }
 
 bool Verifier::window_logprobs(const int32_t* targets, int T, int64_t pos0, int32_t extra_id, std::FILE* out,

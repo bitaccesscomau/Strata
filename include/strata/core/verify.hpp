@@ -278,7 +278,11 @@ public:
     void set_always_publish(bool on) {
         always_publish_ = on;
         if (on) device_plan_ = false;
-        if (on) partial_plan_ = false;
+        if (on && partial_plan_) {
+            partial_plan_ = false;
+            std::fprintf(stderr, "strata verify: partial device plan (STRATA_VERIFY_PARTIAL_PLAN=1): off: windows in flight "
+                                 "publish every activation\n");
+        }
     }
     /// 0.1.43: the adaptive tier's overlap gate (see AdaptGate).  Refused (false) with the device-planned layers (E-6),
     /// which never ask the host, and with STRATA_VERIFY_PARTIAL_PLAN, whose VRAM groups do not wait for the host's
@@ -488,6 +492,7 @@ private:
     cudaEvent_t pp_fork_ = nullptr, pp_planned_ = nullptr, pp_hosted_ = nullptr;
     uint32_t* h_pp_fix_ = nullptr; uint32_t* m_pp_fix_ = nullptr;   ///< layer-windows recomputed from the host's plan
     uint32_t pp_fix_seen_ = 0;
+    int pp_fix_reports_ = 0;              ///< note_partial_plan's reports of a rise (the first 8)
     int64_t pp_windows_ = 0;              ///< windows that ran with the partial plan
     bool pp_used_[9] = {};                ///< per window size: its graph was captured with the partial plan
     void note_partial_plan(int T);        ///< after a window: the first use and any recomputed layers, to the log
