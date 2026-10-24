@@ -423,6 +423,17 @@ hits, the router, the head, ...). The GPU profile times every stage with events,
 use it to compare, not to measure speed. This works with every pack; `--gpu-stages` (a one-token replay of
 per-layer graphs) refuses a native (IQ) pack, which has no such graphs.
 
+**The VRAM experts without the wait for the CPU pool's plan (`STRATA_VERIFY_PARTIAL_PLAN=1`, opt-in, off by
+default):** in a verify window each layer's experts that sit in VRAM normally start only once the CPU pool has
+published its plan for the layer (`waitA` in the GPU profile above). With this switch the GPU plans them itself from
+its residency table, on a side branch of the window's graph, and starts them at once; the pool's plan, copied on the
+same branch, still decides the PCIe share and the CPU rows exactly as without it. The same kernels run on the same
+plan, so the answers do not change. Should the GPU's residency table ever differ from the pool's, the window
+recomputes those experts from the pool's plan (the engine log counts such layers). The startup log says whether it is
+on; it stays off beside `STRATA_VERIFY_DEVICE_PLAN`, `--remote-expert-opt`, `STRATA_PCIE_BALANCE`,
+`--pipeline-windows` and `--batch-groups`, and it turns off `STRATA_ADAPT_OVERLAP` and the Foresight swap space
+(`STRATA_FS_SLOTS`). Its effect on speed has not been measured yet.
+
 **How good the next-layer expert prediction is (measurement only):** `STRATA_LOOKAHEAD_STATS=1` runs the router look-ahead on any expert tier and
 scores it against the routing of the next layer: every 100 windows the engine log has a `strata lookahead stats:` line with the experts per layer
 outside the GPU cache, the recall and precision of the top-k / k+4 / k+10 guesses and of the vote-ranked top 4 / 8 / 12, how much of the PCIe share they

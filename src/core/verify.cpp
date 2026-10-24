@@ -648,6 +648,10 @@ Verifier::~Verifier() {
     if (prof_pin_) cudaFreeHost(prof_pin_);
     if (ev_fork_) cudaEventDestroy(ev_fork_);
     if (ev_join_) cudaEventDestroy(ev_join_);
+    if (pp_cs_) cudaStreamDestroy(pp_cs_);
+    for (cudaEvent_t e : {pp_fork_, pp_planned_, pp_hosted_})
+        if (e) cudaEventDestroy(e);
+    if (pplan_) cudaFree(pplan_);
     for (cudaStream_t s : df_side_)
         if (s) cudaStreamDestroy(s);
     if (df_fork_) cudaEventDestroy(df_fork_);
@@ -656,7 +660,7 @@ Verifier::~Verifier() {
     if (arena_) cudaFree(arena_);
     if (hcount_d_) cudaFree(hcount_d_);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_commit_, h_ple_, h_out_, h_x_, h_ids_, h_w_, h_seq_, h_flag_, h_ymiss_,
-                     h_flagA_, h_plan_, h_flagB_, h_plan_err_, h_nf_, herr_h_, hdrop_h_, h_bal_};
+                     h_flagA_, h_plan_, h_flagB_, h_plan_err_, h_nf_, herr_h_, hdrop_h_, h_bal_, h_pp_fix_};
     for (void* h : hosts)
         if (h) cudaFreeHost(h);
 }
@@ -1085,6 +1089,51 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         }
         if (!ok2) { cudaGetLastError(); all_resident_ = false; device_plan_ = false; }
     }
+    // STRATA_VERIFY_PARTIAL_PLAN=1 (opt-in, exact): each layer's VRAM experts start from the device's residency table
+    // instead of waiting for the host's plan (flag A).  On a branch of the window's graph partial_plan plans them and
+    // wait_copy_plan then copies the host's plan once flag A is up, which decides the PCIe share and the CPU rows
+    // exactly as today (the window still waits for flag B before the PCIe groups).  Unlike E-6 above (its plan on the
+    // window's chain, the host zeroing every GPU row of its mapped buffer, every row copied back over PCIe on a layer
+    // it did not plan), the host side stays as it is and the window's chain gains only the branch's two joins.  Should
+    // the two tables ever differ (they do not while the host's changes reach the device before each window),
+    // wait_copy_plan has the PCIe call recompute the host's GPU entries, so the rows stay the host plan's.
+    {
+        static const bool pp_env = [] {
+            const char* v = std::getenv("STRATA_VERIFY_PARTIAL_PLAN");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        const char* why = all_resident_ ? "every expert is in VRAM (the zero-doorbell graph needs no plan)"
+                          : device_plan_ ? "not with STRATA_VERIFY_DEVICE_PLAN"
+                          : always_publish_ ? "not with windows in flight (--pipeline-windows, --batch-groups)"
+                          : remote_opt_ != nullptr ? "not with --remote-expert-opt"
+                          : bal_ != nullptr ? "not with STRATA_PCIE_BALANCE"
+                          : nullptr;
+        partial_plan_ = pp_env && why == nullptr;
+        if (partial_plan_) {
+            const size_t pbytes = ((size_t) plan_i32_ + 16) * sizeof(int32_t);
+            bool ok3 = pplan_ != nullptr || cudaMalloc((void**) &pplan_, pbytes) == cudaSuccess;
+            ok3 = ok3 && cudaMemset(pplan_, 0, pbytes) == cudaSuccess;
+            if (ok3 && slot_off_d_ == nullptr && hits.slot_off != nullptr && hits.n_slots > 0)
+                ok3 = cudaMalloc((void**) &slot_off_d_, (size_t) hits.n_slots * sizeof(unsigned long long)) == cudaSuccess &&
+                      cudaMemcpy(slot_off_d_, hits.slot_off, (size_t) hits.n_slots * sizeof(unsigned long long),
+                                 cudaMemcpyHostToDevice) == cudaSuccess;
+            if (ok3 && pp_cs_ == nullptr) ok3 = cudaStreamCreateWithFlags(&pp_cs_, cudaStreamNonBlocking) == cudaSuccess;
+            for (cudaEvent_t* e : {&pp_fork_, &pp_planned_, &pp_hosted_})
+                if (ok3 && *e == nullptr) ok3 = cudaEventCreateWithFlags(e, cudaEventDisableTiming) == cudaSuccess;
+            if (ok3 && h_pp_fix_ == nullptr) ok3 = mapped(64, (void**) &h_pp_fix_, (void**) &m_pp_fix_);
+            if (!ok3) {
+                cudaGetLastError();
+                partial_plan_ = false;
+                why = "its buffers could not be allocated";
+            }
+        }
+        if (pp_env)
+            std::fprintf(stderr, "strata verify: partial device plan (STRATA_VERIFY_PARTIAL_PLAN=1): %s%s\n",
+                         partial_plan_ ? "on - a layer's VRAM experts start from the device's residency table, the "
+                                         "host plans the PCIe share and the CPU rows"
+                                       : "off: ",
+                         partial_plan_ ? "" : why);
+    }
     std::fprintf(stderr, "strata verify: window up to %d tokens, %.1f MiB of device buffers%s\n", max_t,
                  (double) count.used / 1048576.0,
                  all_resident_ ? " (100% VRAM resident: zero-doorbell graph)" : "");
@@ -1146,6 +1195,15 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     };
     bool sg_gated_[2] = {false, false};   // per group: the combine applies the shared gate
     if (!batch_rec_) groups_[T] = G;
+    // STRATA_VERIFY_PARTIAL_PLAN (see init): a window of one group, not a batch window
+    const bool pp = partial_plan_ && G == 1 && !batch_rec_;
+    if (!batch_rec_) pp_used_[T] = pp;
+    // test hook (STRATA_TEST_PARTIAL_PLAN_SKEW=N): the device's plan leaves out every expert id divisible by N, as a
+    // device table lagging the host's would, so every such layer takes wait_copy_plan's recompute
+    static const int pp_skew = [] {
+        const char* v = std::getenv("STRATA_TEST_PARTIAL_PLAN_SKEW");
+        return v != nullptr ? std::max(0, std::atoi(v)) : 0;
+    }();
     // Programmatic dependent launch (pdl.hpp; sm_90+, opt-in: STRATA_DF_PDL=1): the window's quantizations and dense
     // projections may start while the kernel before them finishes, loading their weights before they wait for its
     // output.  Only a launch whose predecessors in the graph are all kernels gets programmatic edges; every value is
@@ -2011,6 +2069,27 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 cudaEventRecord(ev_fork_, cs);
                 cudaStreamWaitEvent(sh_cs_, ev_fork_, 0);
             }
+            if (pp) {
+                // STRATA_VERIFY_PARTIAL_PLAN, on its own branch after the doorbell: the device's plan of the VRAM groups
+                // (post runs them without flag A), then the host's plan once flag A is up, copied and checked off the
+                // window's chain (post waits for flag B itself, as without the switch)
+                const uint32_t ring = (uint32_t) ((l - lb_) * G + grp + 1);
+                if (cudaEventRecord(pp_fork_, cs) != cudaSuccess || cudaStreamWaitEvent(pp_cs_, pp_fork_, 0) != cudaSuccess) {
+                    err = "verify: the partial plan's branch could not fork";
+                    return false;
+                }
+                partial_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
+                             hits_.cache_base, slot_off_d_, (long long) hits_.blob, pplan_, (long long) max_t_ * K, pp_skew,
+                             pp_cs_);
+                const bool planned = cudaEventRecord(pp_planned_, pp_cs_) == cudaSuccess;
+                wait_copy_plan(m_flagA_, ring, plan_ + (size_t) grp * (size_t) (plan_i32_ + 16),
+                               m_plan_ + (size_t) grp * (size_t) plan_i32_, plan_i32_, pplan_, (long long) max_t_ * K,
+                               m_pp_fix_, pp_cs_);
+                if (!planned || cudaEventRecord(pp_hosted_, pp_cs_) != cudaSuccess) {
+                    err = "verify: the partial plan's branch could not join";
+                    return false;
+                }
+            }
         }
         stamp(l, 17, grp);
         bool qdedup = false;   // STRATA_VERIFY_QDEDUP took effect: the experts' q8_1 image of xm is already made
@@ -2090,16 +2169,22 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         const auto& lay = strata::kernels::cpu::expert_layout();
         // plan v0.3 P6: the VRAM groups now; the PCIe groups once the copy engine has landed them in staging.
         // `gy`: the native launch's groups side by side (0: cap, one block row per possible group).
-        auto grouped = [&](const unsigned long long* gp, const int32_t* gs, const int32_t* gn, int64_t gy, float* dst_buf) {
+        // `e_dst` / `e_tok`: another plan's entries (STRATA_VERIFY_PARTIAL_PLAN's device plan; null: this group's plan)
+        auto grouped = [&](const unsigned long long* gp, const int32_t* gs, const int32_t* gn, int64_t gy, float* dst_buf,
+                           const int32_t* e_dst = nullptr, const int32_t* e_tok = nullptr) {
+            if (e_dst == nullptr) {
+                e_dst = p_dst;
+                e_tok = p_tok;
+            }
             if (lay.native) {
                 // the layer's GGUF formats (i-quant gate/up, Q2_0 / IQ4_NL down)
                 const auto& f = lay.fmt[(size_t) l];
                 NativeExpertLayout L = native_expert_layout(f.gu_type, f.d_type, f.n_embd, f.n_ff);
                 if (f.had_d) { L.had_block = f.had_block; L.d_signs = had_sh_; }   // APR: h is rotated in there
-                native_expert_grouped(L, gp, gs, gn, p_dst, p_tok, cap, cap,
+                native_expert_grouped(L, gp, gs, gn, e_dst, e_tok, cap, cap,
                                       nat_xq_ + (size_t) tb * (N / 32) * 36, hit_scratch_, dst_buf, cs, gy);
             } else {
-                moe_grouped_s2(gp, gs, gn, p_dst, p_tok, cap, cap, hit_xq_ + (size_t) tb * (N / 32) * 34,
+                moe_grouped_s2(gp, gs, gn, e_dst, e_tok, cap, cap, hit_xq_ + (size_t) tb * (N / 32) * 34,
                                hit_xs_ + (size_t) tb * (N / 32), hit_scratch_, dst_buf, cs);
             }
         };
@@ -2109,6 +2194,24 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             grouped(p_ptr, p_start, p_counts, 0, parts_out);
             stamp(l, 20, grp);
         } else {
+            if (pp) {   // STRATA_VERIFY_PARTIAL_PLAN: the VRAM groups from the device's plan (pre), no flag A
+                const int32_t* d_start = pplan_ + 4;
+                const int32_t* d_dst = d_start + capx + 1;
+                if (cudaStreamWaitEvent(cs, pp_planned_, 0) != cudaSuccess) {
+                    err = "verify: the partial plan's branch could not join";
+                    return false;
+                }
+                stamp(l, 19, grp);
+                grouped((const unsigned long long*) (pplan_ + ptr_off), d_start, pplan_, 0, hit_out, d_dst, d_dst + capx);
+                stamp(l, 20, grp);
+                // the host's plan, copied on the branch once flag A was up; from here on everything reads it, as
+                // without the switch
+                if (cudaStreamWaitEvent(cs, pp_hosted_, 0) != cudaSuccess) {
+                    err = "verify: the partial plan's branch could not join";
+                    return false;
+                }
+                wait_flag_ge(m_flagB_, ring, cs);                  // the PCIe share is in staging (DMA) or mapped
+            } else {
             if (device_plan_) {   // E-6: skipped when the device planned this group (all its experts resident)
                 wait_flag_ge_or(m_flagA_, ring, skip_ + grp, cs);
                 copy_i32_from_mapped_unless(pl, m_plan_ + (size_t) grp * (size_t) plan_i32_, plan_i32_, skip_ + grp, ring, cs);
@@ -2130,11 +2233,14 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             else if (m_bal_ != nullptr)   // set_pcie_balance: the PCIe part starts
                 wait_flag_ge_stamped(m_flagB_, ring, m_bal_ + ((l - lb_) * 2 + grp) * 4 + 1, nullptr, cs);
             else wait_flag_ge(m_flagB_, ring, cs);                 // the PCIe share is in staging (DMA) or mapped
+            }   // (STRATA_VERIFY_PARTIAL_PLAN)
             if (sink_.pcie_mode == 2) {                            // stage it with a copy kernel, then point at staging
                 const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
                 uint8_t* stage = staging_ + (size_t) (grp * per) * lay.max_blob;
-                fetch_blobs(p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), (int) per, cs);
-                rebase_ptrs((unsigned long long*) p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), cs);
+                // (STRATA_VERIFY_PARTIAL_PLAN: counts[3], the host's own PCIe groups - counts[2] may hold its VRAM
+                // groups after them, see wait_copy_plan, and those are read where they are)
+                fetch_blobs(p_ptr2, p_counts + (pp ? 3 : 2), stage, (int64_t) lay.blob_bytes(l), (int) per, cs);
+                rebase_ptrs((unsigned long long*) p_ptr2, p_counts + (pp ? 3 : 2), stage, (int64_t) lay.blob_bytes(l), cs);
             }
             stamp(l, 21, grp);
             // the PCIe share is pcie_frac of the misses: a few groups when the cache is cold, usually none (always none at
@@ -3119,6 +3225,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             err = "verify: the all-resident plan met an expert that is not in VRAM (the residency table changed during the window)";
             return false;
         }
+        if (pp_used_[T]) note_partial_plan(T);
         commit_pending_ = false;
         if (prof_on_ && G == 1) collect_profile();
         return true;
@@ -3146,6 +3253,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         err = "verify: the all-resident plan met an expert that is not in VRAM (the residency table changed during the window)";
         return false;
     }
+    if (pp_used_[T]) note_partial_plan(T);
     commit_pending_ = false;
     progress_at("verify window: waiting for the expert copies", (int64_t) T);
     if (copy_used_) {
@@ -3304,6 +3412,28 @@ void Verifier::publish_plan(void* ctx) {
     Verifier* v = (Verifier*) ctx;
     _mm_sfence();
     *(volatile uint32_t*) v->h_flagA_ = v->cur_layer_ + 1;
+}
+
+// STRATA_VERIFY_PARTIAL_PLAN, after a window's sync: the log shows that it ran (the first window) and each time
+// wait_copy_plan had to recompute layers from the host's plan (the device's residency table differed from the host's;
+// none is expected while the host's changes reach the device before every window).  `h_pp_fix_` only grows.
+void Verifier::note_partial_plan(int T) {
+    if (h_pp_fix_ == nullptr) return;
+    ++pp_windows_;
+    if (pp_windows_ == 1)
+        std::fprintf(stderr, "strata verify: partial device plan: first window ran (%d tokens, layers %lld-%lld planned on "
+                             "the device)\n", T, (long long) lb_, (long long) le_ - 1);
+    const uint32_t fix = *(volatile uint32_t*) h_pp_fix_;
+    if (fix != pp_fix_seen_) {
+        static std::atomic<int> reports{0};   // the first few, then one a 1024 windows
+        if (reports.load() < 8 || (pp_windows_ & 1023) == 0) {
+            reports.fetch_add(1);
+            std::fprintf(stderr, "strata verify: partial device plan: %u layer-windows recomputed from the host's plan in "
+                                 "%lld windows (the device's residency table differed from the host's)\n",
+                         fix, (long long) pp_windows_);
+        }
+        pp_fix_seen_ = fix;
+    }
 }
 
 bool Verifier::window_logprobs(const int32_t* targets, int T, int64_t pos0, int32_t extra_id, std::FILE* out,
