@@ -35,7 +35,18 @@ public:
     /// `t_mtp`: the MTP's window; `lookup_k`: the lookup proposal's length (0 = none); `match`: its match length.
     Pick choose(int t_mtp, int lookup_k, int match) const;
     /// After the round: the window it used, the drafts accepted, and the round's time (verify + commit + draft).
-    void observe(bool lookup, int t, int accepted, int match, double round_ms);
+    /// `disagree`: a choose_disagree() window; it teaches the round's cost only (its first token goes to observe_first).
+    void observe(bool lookup, int t, int accepted, int match, double round_ms, bool disagree = false);
+
+    /// STRATA_SUFFIX_LONG_BYPASS: a lookup whose first token is not the MTP's first draft, so one of the two is wrong.
+    /// Its first token holds with first_rate(match), its own rate by match length (prior 0.5, the lookup counts' decay),
+    /// taught by every such window whether or not it was verified (observe_first); the drafts after it hold as an
+    /// ordinary lookup's, q = lookup_rate(match).  E(k) = 1 + h (1 + q + .. + q^(k-1)) at the measured cost of k + 1
+    /// must beat the MTP window's tokens per ms by `margin`; no probing.  It only chooses which drafts to verify.
+    Pick choose_disagree(int t_mtp, int lookup_k, int match) const;
+    /// After a window with such a lookup: did its first token hold (the window's row-0 output)?
+    void observe_first(int match, bool held);
+    double first_rate(int match) const;
 
     /// --lookup-chain: how many of `k_avail` lookup tokens to append after an MTP window of `t_mtp` tokens whose
     /// drafts all hold with probability `p_mtp` (estimated from the draft layer's own probabilities): the k with the
@@ -89,6 +100,7 @@ private:
     int bk_ = 0;                                           // the current context bucket
     std::array<double, kMaxT + 1> mtp_tok_{}, mtp_n_{};    // tokens committed by MTP windows of that size
     std::array<double, kBuckets> ok_{}, bad_{};            // lookup drafts accepted / windows cut short, decayed
+    std::array<double, kBuckets> dok_{}, dbad_{};          // STRATA_SUFFIX_LONG_BYPASS: first tokens held / not, decayed
     std::array<double, kBuckets> cok_{}, cbad_{};          // chained lookup drafts, the same (reached rounds only)
     double rounds_ = 0;                                    // rounds observed so far
     bool robust_ = false;

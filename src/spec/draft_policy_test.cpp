@@ -5,7 +5,9 @@
 //   2. lookup drafts that are mostly rejected stop being taken (their bucket's rate falls);
 //   3. lookup drafts that are always accepted are taken, and the window grows with them;
 //   4. match-length buckets learn separately (short matches failing does not stop long ones);
-//   5. the policy never proposes a window beyond its cap.
+//   5. the policy never proposes a window beyond its cap;
+//   6. STRATA_SUFFIX_LONG_BYPASS: a lookup against the MTP's other first draft is taken only where its own learned
+//      first-token rate pays, never at the prior against a strong MTP, and it leaves the ordinary counts alone.
 #include "strata/spec/draft_policy.hpp"
 
 #include <cstdio>
@@ -113,6 +115,44 @@ int main() {
         check(probes > 0 && probes <= 3 && spaced,
               "chain: stale full size is re-probed despite a profitable shorter chain");
         check(probes > 0 && confident, "chain: stale re-probes retain the MTP confidence gate");
+    }
+    {
+        // STRATA_SUFFIX_LONG_BYPASS (choose_disagree): every width measured, an MTP that is right 2 of 3 drafts at width 4
+        DraftPolicy p(6);
+        for (int t = 2; t <= 6; ++t) for (int i = 0; i < 4; ++i) p.observe(false, t, t - 1, 0, cost(t));
+        for (int i = 0; i < 60; ++i) p.observe(false, 4, 2, 0, cost(4));
+        for (int i = 0; i < 60; ++i) p.observe(false, 1, 0, 0, cost(1));
+        check(p.first_rate(30) > 0.49 && p.first_rate(30) < 0.51, "disagree: the first-token rate starts at its prior 0.5");
+        check(!p.choose_disagree(4, 5, 30).lookup, "disagree: not taken at the prior against a confident MTP window");
+        check(!p.choose_disagree(4, 0, 30).lookup && p.choose_disagree(4, 0, 30).t == 4, "disagree: no proposal, the MTP window");
+        const double q30 = p.lookup_rate(30), q15 = p.lookup_rate(15);
+        const DraftPolicy::Pick a0 = p.choose(4, 5, 30), b0 = p.choose(1, 5, 15);
+        for (int i = 0; i < 60; ++i) p.observe_first(30, true);              // its first token always held
+        check(p.first_rate(30) > 0.9, "disagree: first tokens that hold raise its rate above 0.9");
+        const DraftPolicy::Pick k = p.choose_disagree(4, 5, 30);
+        check(k.lookup && k.t == 6, "disagree: a rate near 1 takes the full lookup over the MTP window");
+        check(k.lookup && p.choose_disagree(4, 20, 30).t <= 6, "disagree: never beyond the window cap");
+        check(p.first_rate(15) > 0.49 && p.first_rate(15) < 0.51 && !p.choose_disagree(4, 5, 15).lookup,
+              "disagree: buckets are separate (a 15-token match keeps its prior)");
+        const DraftPolicy::Pick a1 = p.choose(4, 5, 30), b1 = p.choose(1, 5, 15);
+        check(p.lookup_rate(30) == q30 && p.lookup_rate(15) == q15 && a0.lookup == a1.lookup && a0.t == a1.t &&
+              b0.lookup == b1.lookup && b0.t == b1.t, "disagree: observe_first leaves the ordinary lookup choice alone");
+        for (int i = 0; i < 200; ++i) p.observe(true, 6, 0, 30, cost(6), true);   // verified windows, all cut at once
+        check(p.lookup_rate(30) == q30 && p.choose_disagree(4, 5, 30).lookup,
+              "disagree: its verified windows teach the round cost, not the ordinary lookup rate");
+        for (int i = 0; i < 200; ++i) p.observe_first(30, false);            // then it stops holding
+        check(p.first_rate(30) < 0.1, "disagree: first tokens that fail bring its rate below 0.1 (decayed counts)");
+        check(!p.choose_disagree(1, 5, 30).lookup, "disagree: a failing rate is not taken, even over a one-token window");
+    }
+    {
+        // the bypass pays where the MTP is unsure (a one-token window) before it pays against a confident one
+        DraftPolicy p(6);
+        for (int t = 2; t <= 6; ++t) for (int i = 0; i < 4; ++i) p.observe(false, t, t - 1, 0, cost(t));
+        for (int i = 0; i < 60; ++i) p.observe(false, 4, 3, 0, cost(4));
+        for (int i = 0; i < 60; ++i) p.observe(false, 1, 0, 0, cost(1));
+        for (int i = 0; i < 60; ++i) p.observe_first(30, i % 4 != 0);       // three in four hold
+        check(p.choose_disagree(1, 5, 30).lookup, "disagree: a 0.75 rate is taken over a one-token MTP window");
+        check(!p.choose_disagree(4, 5, 30).lookup, "disagree: a 0.75 rate is not taken over a near-perfect MTP window of 4");
     }
     std::printf(g_fail ? "FAIL\n" : "PASS\n");
     return g_fail ? 1 : 0;

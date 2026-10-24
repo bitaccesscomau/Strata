@@ -19,6 +19,9 @@ constexpr double kDecay = 0.97;       // lookup counts: older windows fade
 // on the same thing); worth 4 observations, so a few real windows override it
 constexpr double kPriorQ[DraftPolicy::kBuckets] = {0.75, 0.88, 0.93, 0.96};
 constexpr double kPriorN = 4.0;
+// STRATA_SUFFIX_LONG_BYPASS: a lookup's first token against the MTP's other first draft holds as often as not until
+// measured (worth kPriorN observations, as the lookup prior)
+constexpr double kPriorFirst = 0.5;
 constexpr int kProbes = 3;       // a lookup window size is tried this often before its guessed cost can veto it
 // A size not measured for this many rounds is tried again when a confident lookup could use it: its cost was set in
 // one stretch (a prompt's cache refill, say) and, priced high, it would never be measured again (#1252)
@@ -151,7 +154,7 @@ DraftPolicy::Pick DraftPolicy::choose(int t_mtp, int lookup_k, int match) const 
     return p;
 }
 
-void DraftPolicy::observe(bool lookup, int t, int accepted, int match, double round_ms) {
+void DraftPolicy::observe(bool lookup, int t, int accepted, int match, double round_ms, bool disagree) {
     t = std::clamp(t, 1, kMaxT);
     if (round_ms > 0) {
         round_ms = clamp_sample(t, round_ms);
@@ -161,6 +164,7 @@ void DraftPolicy::observe(bool lookup, int t, int accepted, int match, double ro
         last_[bk_][t] = rounds_;
     }
     rounds_ += 1.0;
+    if (disagree) return;   // a choose_disagree() window: its first token taught observe_first, not these counts
     if (lookup) {
         const int b = bucket(match);
         ok_[b] = kDecay * ok_[b] + accepted;
@@ -170,6 +174,38 @@ void DraftPolicy::observe(bool lookup, int t, int accepted, int match, double ro
         mtp_tok_[t] = mtp_n_[t] > 0 ? (1.0 - kTokAlpha) * mtp_tok_[t] + kTokAlpha * got : got;
         mtp_n_[t] += 1.0;
     }
+}
+
+double DraftPolicy::first_rate(int match) const {
+    const int b = bucket(match);
+    return (dok_[b] + kPriorN * kPriorFirst) / (dok_[b] + dbad_[b] + kPriorN);
+}
+
+void DraftPolicy::observe_first(int match, bool held) {
+    const int b = bucket(match);
+    dok_[b] = kDecay * dok_[b] + (held ? 1.0 : 0.0);
+    dbad_[b] = kDecay * dbad_[b] + (held ? 0.0 : 1.0);
+}
+
+DraftPolicy::Pick DraftPolicy::choose_disagree(int t_mtp, int lookup_k, int match) const {
+    Pick p;
+    p.t = std::clamp(t_mtp, 1, max_t_);
+    if (lookup_k <= 0) return p;
+    const double base = mtp_tokens(p.t) / cost_ms(p.t);
+    const double h = first_rate(match), q = lookup_rate(match);
+    double e = 1.0, qi = h, best = 0.0;   // qi: the chance that draft k (1-based) holds, h q^(k-1)
+    int best_t = 0;
+    for (int k = 1; k <= std::min(lookup_k, max_t_ - 1); ++k) {
+        e += qi;
+        qi *= q;
+        const double r = e / cost_ms(k + 1);
+        if (r > best) { best = r; best_t = k + 1; }
+    }
+    if (best_t > 0 && best > base * (1.0 + margin_)) {
+        p.lookup = true;
+        p.t = best_t;
+    }
+    return p;
 }
 
 namespace {

@@ -150,11 +150,15 @@ suffix/prompt-lookup drafter only (or one token per round), every token is still
 draft layer's VRAM (~0.7-1 GiB with its head) goes to the expert cache: 1,000 -> 1,678 slots in one A/B on an 8 GB
 card. The conversation cache (`--conversation-cache-mib`) stays on: a parked conversation then carries no draft K/V.
 
-**Long prompt-lookup matches the draft layer refuses (the `lookup gate` line):** a prompt-lookup window is verified
-only when its first token is the draft layer's first draft. A request with lookups of 12 or more matched tokens
-(`STRATA_SUFFIX_LONG_MIN=<n>`, 3 to 64) that proposed another first token logs `strata serve: lookup gate: N windows
-had a 12+ match with a different first token, H of them held / W decode windows` (H: the lookup's first token was the
-one the window verified). It only counts; nothing is verified differently.
+**Long prompt-lookup matches the draft layer refuses (the `lookup gate` line; opt-in `STRATA_SUFFIX_LONG_BYPASS=1`):**
+a prompt-lookup window is verified only when its first token is the draft layer's first draft. A request with lookups
+of 12 or more matched tokens (`STRATA_SUFFIX_LONG_MIN=<n>`, 3 to 64) that proposed another first token logs `strata
+serve: lookup gate: N windows had a 12+ match with a different first token, H of them held / W decode windows` (H: the
+lookup's first token was the one the window verified); by default it only counts. With `STRATA_SUFFIX_LONG_BYPASS=1`
+such a lookup is offered to the draft policy anyway: it keeps a first-token rate of its own for them (taught by every
+such window, prior 0.5) and verifies one only where its expected tokens per millisecond beat the MTP window's, and the
+line adds how many it verified. Every draft is still checked, so the text is the model's; like any change of window
+shape, it can change the CPU rows' rounding (see Reproducible greedy output above).
 
 **Low-RAM mode (engine 0.1.26, chosen by setup):** normally all of a model's experts are copied into RAM (23-50 GB,
 pinned) and the GPU holds a copy of the most-used ones. On a PC whose RAM cannot hold them beside the system (the
