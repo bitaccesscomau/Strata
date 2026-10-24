@@ -214,15 +214,23 @@ class Served(unittest.TestCase):
             more = got + out_ids
             with self.subTest(tag + " continued"):
                 self.assertEqual(cache.text(more)[0], full_line(more))
-        return n
+        return n, got
+
+    @staticmethod
+    def tally(counts, n, got, prev):
+        """How the line went on from the conversation's previous one: from all of it, from inside it (an edit, a
+        dropped reasoning block, a merge across its end), or not at all."""
+        key = "full" if n == 0 else "whole" if prev is not None and n >= len(prev) else "inside"
+        counts[key] = counts.get(key, 0) + 1
 
     def chat_conversations(self, tok, template, seed, convs=40, turns=8):
         rng = random.Random(seed)
-        reused = lines = 0
+        counts: dict = {}
         with tempfile.TemporaryDirectory() as d:
             svc, ref = self.services(tok, template, d)
             cache = small(keep=3)
             for conv in range(convs):
+                prev = None
                 svc.effort_end = ref.effort_end = rng.random() < 0.5     # #458: the three-render path
                 tools = TOOLS if rng.random() < 0.5 else None
                 msgs = [{"role": "system", "content": words(rng)}] if rng.random() < 0.7 else []
@@ -238,9 +246,10 @@ class Served(unittest.TestCase):
                     force = "<tool_call>\n<function=tool_1>\n" if tools and kw.get("enable_thinking") is False \
                         and rng.random() < 0.3 else None
                     out = [an_id(rng) % 256 for _ in range(rng.randint(1, 6))] if rng.random() < 0.3 else None
-                    n = self.check(svc, ref, cache, msgs, tools, kw, force, out, f"seed {seed} conv {conv} turn {turn}")
-                    reused += n > 0
-                    lines += 1
+                    n, prev_got = self.check(svc, ref, cache, msgs, tools, kw, force, out,
+                                             f"seed {seed} conv {conv} turn {turn}")
+                    self.tally(counts, n, prev_got, prev)
+                    prev = prev_got + (out or [])
                     # the reply, as the client sends it back next turn
                     reply = {"role": "assistant", "content": words(rng, 20) if rng.random() < 0.8 else ""}
                     if rng.random() < 0.5:
@@ -270,29 +279,34 @@ class Served(unittest.TestCase):
                         msgs = msgs[:rng.randrange(2, len(msgs))]
                         if msgs[-1]["role"] != "user":
                             msgs.append({"role": "user", "content": words(rng)})
-        return reused, lines
+        return counts
+
+    def assert_both_ways(self, counts):
+        """Most lines went on from a kept one, and both ways occurred: from all of the previous line and from inside it."""
+        self.assertGreater(counts.get("whole", 0) + counts.get("inside", 0), sum(counts.values()) // 2, counts)
+        self.assertGreater(counts.get("whole", 0), 10, counts)
+        self.assertGreater(counts.get("inside", 0), 10, counts)
 
     def test_chat_conversations_byte_tokenizer(self):
-        reused, lines = self.chat_conversations(ThinkTokenizer(), ChatTemplate(ROOT / "serve/chat_template.jinja"), 567)
-        self.assertGreater(reused, lines // 2)
+        self.assert_both_ways(self.chat_conversations(ThinkTokenizer(), ChatTemplate(ROOT / "serve/chat_template.jinja"), 567))
 
     def test_chat_conversations_pack_tokenizer(self):
         got = the_pack()
         if got is None:
             self.skipTest("no pack tokenizer (STRATA_TOKENIZER)")
-        reused, lines = self.chat_conversations(got[0], got[1], 1189, convs=30)
-        self.assertGreater(reused, lines // 2)
+        self.assert_both_ways(self.chat_conversations(got[0], got[1], 1189, convs=30))
 
     def responses_conversations(self, tok, template, seed, convs=30, turns=6):
         """/v1/responses: input items through responses.py's conversion, then the same prepare()."""
         rng = random.Random(seed)
-        reused = lines = 0
+        counts: dict = {}
         tools = [{"type": "function", "name": f"tool_{i}", "description": "does a thing",
                   "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}} for i in range(3)]
         with tempfile.TemporaryDirectory() as d:
             svc, ref = self.services(tok, template, d)
             cache = small(keep=3)
             for conv in range(convs):
+                prev = None
                 req = {"instructions": words(rng), "input": [{"type": "message", "role": "user", "content": words(rng, 30)}],
                        "tools": tools if rng.random() < 0.6 else []}
                 for turn in range(turns):
@@ -300,9 +314,10 @@ class Served(unittest.TestCase):
                     msgs = responses_api.input_messages(copy.deepcopy(req))
                     shown, _, _ = responses_api.request_tools(req)
                     kw = responses_api.template_kwargs(req, {})
-                    n = self.check(svc, ref, cache, msgs, shown, kw, None, None, f"seed {seed} conv {conv} turn {turn}")
-                    reused += n > 0
-                    lines += 1
+                    n, prev_got = self.check(svc, ref, cache, msgs, shown, kw, None, None,
+                                             f"seed {seed} conv {conv} turn {turn}")
+                    self.tally(counts, n, prev_got, prev)
+                    prev = prev_got
                     items = req["input"]
                     if rng.random() < 0.5:
                         items.append({"type": "reasoning", "content": [{"type": "reasoning_text", "text": words(rng, 20)}]})
@@ -317,18 +332,16 @@ class Served(unittest.TestCase):
                     items.append({"type": "message", "role": "user", "content": words(rng, 20)})
                     if rng.random() < 0.1:
                         req["instructions"] = words(rng)            # new instructions: the system prompt changes
-        return reused, lines
+        return counts
 
     def test_responses_conversations_byte_tokenizer(self):
-        reused, lines = self.responses_conversations(ThinkTokenizer(), ChatTemplate(ROOT / "serve/chat_template.jinja"), 924)
-        self.assertGreater(reused, lines // 2)
+        self.assert_both_ways(self.responses_conversations(ThinkTokenizer(), ChatTemplate(ROOT / "serve/chat_template.jinja"), 924))
 
     def test_responses_conversations_pack_tokenizer(self):
         got = the_pack()
         if got is None:
             self.skipTest("no pack tokenizer (STRATA_TOKENIZER)")
-        reused, lines = self.responses_conversations(got[0], got[1], 2228, convs=20)
-        self.assertGreater(reused, lines // 2)
+        self.assert_both_ways(self.responses_conversations(got[0], got[1], 2228, convs=20))
 
 
 class EngineLine(unittest.TestCase):
