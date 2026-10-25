@@ -78,6 +78,32 @@ bool conversation_checkpoint_restore(const ConversationCheckpoint& checkpoint, S
 bool conversation_checkpoint_copy(const SessionState& from, SessionState& to, const std::vector<int32_t>& ids,
                                   const ModelGeometry& g, std::string& error, bool queued = false);
 
+// STRATA_CKPT_ASYNC (generate.cpp): a checkpoint's running state copied out through one contiguous host image (a
+// pinned staging buffer) on the caller's stream, then into the checkpoint's vectors.  The image holds the parts
+// conversation_checkpoint_save copies, at the offsets below: first the ones a verify window's run writes (the PLE
+// history, the indexer tails, dead keys and block positions), last the GDN rows, which only a commit or a one-token
+// window writes.  Each part starts on a 256-byte boundary.
+struct ConversationCheckpointLayout {
+    size_t layers = 0;                                   ///< the session's own QSA layers
+    size_t gdn = 0, ple = 0, tail = 0, dead = 0, block_pos = 0;   ///< bytes: gdn and ple whole, the rest per layer
+    size_t ple_at = 0, tails_at = 0, dead_at = 0, block_pos_at = 0, gdn_at = 0, bytes = 0;
+};
+/// The image of a checkpoint of `tokens` tokens of this session (the checks conversation_checkpoint_save makes).
+bool conversation_checkpoint_layout(const SessionState& session, const ModelGeometry& g, size_t tokens,
+                                    ConversationCheckpointLayout& layout, std::string& error);
+/// Queues the copies of the running state into `staging` (layout.bytes) on `stream`: the small parts, then
+/// `small_done` is recorded, then the GDN rows.  Nothing waits.  The caller has synchronized the device, records its
+/// own event for the GDN rows after this, and keeps every writer of the state behind the copies: a window's run
+/// behind `small_done`, a commit or a one-token window behind the GDN rows.  `stream` is a cudaStream_t and
+/// `small_done` a cudaEvent_t, passed as void* because the SYCL port includes this header without the CUDA types.
+bool conversation_checkpoint_queue(void* staging, const ConversationCheckpointLayout& layout, const SessionState& session,
+                                   void* stream, void* small_done, std::string& error);
+/// Host only, no CUDA call: sizes the checkpoint's vectors as conversation_checkpoint_save does (a pooled checkpoint's
+/// already are: nothing is filled) and copies in the small parts of a staging image the queue's copies have filled,
+/// or with `gdn_rows` the GDN rows.  Every byte of each part's vector is overwritten.
+void conversation_checkpoint_unstage(ConversationCheckpoint& checkpoint, const void* staging,
+                                     const ConversationCheckpointLayout& layout, bool gdn_rows);
+
 struct ConversationView {
     const std::vector<int32_t>& ids;
     const std::vector<ConversationImageKey>& images;
