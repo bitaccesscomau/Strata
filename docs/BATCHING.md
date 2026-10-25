@@ -117,6 +117,7 @@ decodes alone.
 | `STRATA_SLOT_COPY_BATCHSYNC=1` | with the above: queue the ~116 copies and synchronize each device once |
 | `STRATA_SLOT_CKPT_MOVE=1` | the admission's turn checkpoint moves into the slot (no 112 MB copy); it also keeps the dropped checkpoints' storage, as `STRATA_CKPT_POOL` does; a session SAVE or parked conversation taken right after an admission lacks the moved checkpoint (the slot holds it) |
 | `STRATA_CKPT_POOL=1`, `STRATA_CKPT_THREADS=1` | a checkpoint is saved into the vectors of a dropped one; a split's stage parts are saved at once |
+| `STRATA_CKPT_ASYNC=1` | one GPU only: the turn checkpoint is copied out on its own stream into a pinned staging buffer (one checkpoint's running state, held for the process; its size is in the start-up line) while the header windows read, and joins the chain once whole; the same bytes. `STRATA_CKPT_ASYNC_VERIFY=1` (tests) also saves each one synchronously and logs the byte comparison |
 | `STRATA_ADMIT_MERGE_FIRST=1` | an admission reads its last prompt tokens and its first token in one window (all experts resident only) |
 | `STRATA_PIPE_BYIELD_NODRAIN=1` | a BYIELD that reaches a pipelined batch is dropped without draining the groups |
 | `STRATA_BATCH_SELF_COMMIT=1` | a one-row-per-slot window advances the GDN state itself, no commit graph |

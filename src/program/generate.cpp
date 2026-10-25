@@ -210,6 +210,32 @@ bool ckpt_pool_env() {
     }();
     return on;
 }
+// STRATA_CKPT_ASYNC=1 (read once; off by default): one GPU's turn checkpoint (the one at the last <|im_start|>, ~118 MB
+// of running state) is copied out on a stream of its own into a pinned staging buffer while the header windows read,
+// and a thread moves it into the checkpoint's vectors, instead of the windows waiting for a device sync and ~40
+// pageable copies.  The checkpoint joins the chain once it is whole, before the prompt read ends, and holds the same
+// bytes (AsyncCheckpoint).  The staging buffer is one checkpoint's running state, pinned for the process
+bool ckpt_async_env() {
+#if defined(STRATA_GPU_METAL)
+    return false;
+#else
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_CKPT_ASYNC");
+        return v && v[0] != '0';
+    }();
+    return on;
+#endif
+}
+// STRATA_CKPT_ASYNC_VERIFY=1 (read once; tests only): every STRATA_CKPT_ASYNC checkpoint is also saved synchronously
+// first, and the two are compared byte for byte when it joins the chain (one log line each; on a difference the
+// synchronous copy is kept)
+bool ckpt_async_verify_env() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_CKPT_ASYNC_VERIFY");
+        return v && v[0] != '0';
+    }();
+    return on;
+}
 // STRATA_CKPT_THREADS=1 (read once; off by default): a layer split's checkpoint saves every stage's part at once, the
 // first on the calling thread and each later stage's on a thread of its own device (kept for the process: the copies'
 // private streams are per thread), instead of one stage after the other.  Each part is the same copy of the same state
@@ -1783,6 +1809,236 @@ private:
     size_t cap_;
     std::mutex mu_;
     std::vector<ConvCheckpoint> free_;
+};
+
+/// STRATA_CKPT_ASYNC: one GPU's turn checkpoint, copied out while the header windows read.  begin() (the device is
+/// synchronized: the state is complete) queues the copies of the running state on a stream of its own into one pinned
+/// staging buffer, the parts a window's run writes (the PLE history, the indexer tails, dead keys and block
+/// positions) first, and returns once those have landed; the GDN rows follow, and fence() is the wait the serve loop
+/// puts before anything that writes them (a commit, a one-token window).  A thread of its own sizes the checkpoint's
+/// vectors meanwhile (a pooled checkpoint's already are) and moves the staged bytes into them; finish() hands the
+/// checkpoint over whole.  The serve loop keeps it out of its chain until then and calls finish() before anything
+/// else uses the chain or the state (the next checkpoint, a batched part, the end of the prompt read, the engine's
+/// exit), so no restore, park, eviction or session save can meet a half-copied checkpoint.  One checkpoint is in
+/// flight at a time; the staging buffer is one checkpoint's running state, allocated once and kept for the process.
+class AsyncCheckpoint {
+public:
+    AsyncCheckpoint() = default;
+    AsyncCheckpoint(const AsyncCheckpoint&) = delete;
+    AsyncCheckpoint& operator=(const AsyncCheckpoint&) = delete;
+    ~AsyncCheckpoint() {
+        if (th_.joinable()) {
+            {
+                std::unique_lock<std::mutex> lk(mu_);
+                done_cv_.wait(lk, [&] { return !busy_; });   // a copy in flight lands first: it reads the session
+                quit_ = true;
+            }
+            go_cv_.notify_all();
+            th_.join();
+        }
+        const strata::core::OnDevice on(dev_);
+        if (stream_ != nullptr) (void) cudaStreamSynchronize(stream_);
+        if (stage_ != nullptr) (void) cudaFreeHost(stage_);
+        if (small_ev_ != nullptr) (void) cudaEventDestroy(small_ev_);
+        if (gdn_ev_ != nullptr) (void) cudaEventDestroy(gdn_ev_);
+        if (stream_ != nullptr) (void) cudaStreamDestroy(stream_);
+    }
+    /// The staging buffer of `bytes`, the stream and the events on the current device, and the thread, once.  False
+    /// (`why`): none of them, and every checkpoint is saved synchronously as before
+    bool init(size_t bytes, std::string& why) {
+        if (stage_ != nullptr) return true;
+        int dev = 0;
+        cudaError_t e = cudaGetDevice(&dev);
+        void* p = nullptr;
+        cudaStream_t s = nullptr;
+        cudaEvent_t a = nullptr, b = nullptr;
+        if (e == cudaSuccess) e = cudaHostAlloc(&p, bytes, cudaHostAllocDefault);
+        if (e == cudaSuccess) e = cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
+        if (e == cudaSuccess) e = cudaEventCreateWithFlags(&a, cudaEventDisableTiming);
+        if (e == cudaSuccess) e = cudaEventCreateWithFlags(&b, cudaEventDisableTiming);
+        if (e != cudaSuccess) {
+            why = cudaGetErrorString(e);
+            (void) cudaGetLastError();
+            if (b != nullptr) cudaEventDestroy(b);
+            if (a != nullptr) cudaEventDestroy(a);
+            if (s != nullptr) cudaStreamDestroy(s);
+            if (p != nullptr) cudaFreeHost(p);
+            return false;
+        }
+        dev_ = dev;
+        stage_ = p;
+        cap_ = bytes;
+        stream_ = s;
+        small_ev_ = a;
+        gdn_ev_ = b;
+        th_ = std::thread([this] { loop(); });
+        return true;
+    }
+    bool on() const { return stage_ != nullptr; }
+    bool pending() const { return pending_; }
+    /// Queues checkpoint `c` (its tokens set, the device synchronized) and returns once the parts a window's run writes
+    /// have landed.  `c` is taken only on success; false: nothing is in flight and `c` is as it was (`why`), for the
+    /// synchronous save.  `ref` (STRATA_CKPT_ASYNC_VERIFY, `verify`): the synchronous save, compared with at the end
+    bool begin(ConvCheckpoint& c, ConvCheckpoint&& ref, bool verify, int64_t L, bool as_tail,
+               const strata::core::SessionState& ss, const strata::core::ModelGeometry& g, std::string& why) {
+        if (stage_ == nullptr || pending_) { why = "the staging buffer is busy"; return false; }
+        strata::core::ConversationCheckpointLayout lay;
+        if (!strata::core::conversation_checkpoint_layout(ss, g, c.ids.size(), lay, why)) return false;
+        if (lay.bytes > cap_) { why = "the checkpoint is larger than the staging buffer"; return false; }
+        const strata::core::OnDevice on(dev_);
+        t_begin_ = Clock::now();
+        cudaError_t e = cudaSuccess;
+        if (!strata::core::conversation_checkpoint_queue(stage_, lay, ss, stream_, small_ev_, why) ||
+            (e = cudaEventRecord(gdn_ev_, stream_)) != cudaSuccess ||
+            (e = cudaEventSynchronize(small_ev_)) != cudaSuccess) {   // what a window's run writes is out
+            if (e != cudaSuccess) why = cudaGetErrorString(e);
+            (void) cudaStreamSynchronize(stream_);   // nothing stays in flight
+            return false;
+        }
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            c_ = std::move(c);
+            ref_ = std::move(ref);
+            verify_ = verify;
+            lay_ = lay;
+            L_ = L;
+            as_tail_ = as_tail;
+            job_err_.clear();
+            note_.clear();
+            thrown_ = nullptr;
+            busy_ = true;
+            job_ = true;
+        }
+        pending_ = true;
+        landed_ = false;
+        go_cv_.notify_one();
+        return true;
+    }
+    /// The GDN rows have landed in the staging buffer: whatever writes them may run (at once when nothing is in flight)
+    bool fence(std::string& why) {
+        if (!pending_ || landed_) return true;
+        const strata::core::OnDevice on(dev_);
+        const cudaError_t e = cudaEventSynchronize(gdn_ev_);
+        if (e != cudaSuccess) { why = cudaGetErrorString(e); return false; }
+        landed_ = true;
+        return true;
+    }
+    /// Waits for the thread and hands the checkpoint over, whole, with its position and kind.  False: a copy failed
+    /// (`why`).  `note`: the STRATA_CKPT_ASYNC_VERIFY result.  `job_ms`: from begin() until it was whole
+    bool finish(ConvCheckpoint& out, int64_t& L, bool& as_tail, std::string& why, std::string& note, double& job_ms) {
+        std::unique_lock<std::mutex> lk(mu_);
+        done_cv_.wait(lk, [&] { return !busy_; });
+        pending_ = false;
+        landed_ = false;
+        ref_ = ConvCheckpoint{};
+        if (thrown_) {   // (a failed allocation: thrown here, as the synchronous save would have)
+            std::exception_ptr t = thrown_;
+            thrown_ = nullptr;
+            c_ = ConvCheckpoint{};
+            std::rethrow_exception(t);
+        }
+        if (!job_err_.empty()) {
+            why = job_err_;
+            c_ = ConvCheckpoint{};
+            return false;
+        }
+        out = std::move(c_);
+        c_ = ConvCheckpoint{};
+        L = L_;
+        as_tail = as_tail_;
+        note = note_;
+        job_ms = job_ms_;
+        return true;
+    }
+private:
+    void loop() {
+        strata::platform::name_this_thread("strata-ckpt-async");
+#if defined(__linux__)
+        {   // off the host thread's one CPU (aux_cpus.hpp), as StageThreads does
+            cpu_set_t all;
+            CPU_ZERO(&all);
+            for (int c = 0; c < CPU_SETSIZE; ++c) CPU_SET(c, &all);
+            (void) sched_setaffinity(0, sizeof all, &all);
+            strata::aux_cpus::pin_current_thread();
+        }
+#endif
+        std::unique_lock<std::mutex> lk(mu_);
+        for (;;) {
+            go_cv_.wait(lk, [&] { return quit_ || job_; });
+            if (!job_) return;
+            job_ = false;
+            lk.unlock();
+            work();
+            lk.lock();
+            busy_ = false;
+            done_cv_.notify_all();
+        }
+    }
+    // on the thread: the checkpoint, the reference and the staged image are its own until busy_ clears
+    void work() {
+        try {
+            // the vectors and the small parts (landed before begin() returned) while the GDN rows are on their way
+            strata::core::conversation_checkpoint_unstage(c_, stage_, lay_, false);
+            cudaError_t e;
+            {
+                const strata::core::OnDevice on(dev_);
+                e = cudaEventSynchronize(gdn_ev_);
+            }
+            if (e != cudaSuccess) {
+                job_err_ = cudaGetErrorString(e);
+                return;
+            }
+            strata::core::conversation_checkpoint_unstage(c_, stage_, lay_, true);
+            job_ms_ = std::chrono::duration<double, std::milli>(Clock::now() - t_begin_).count();
+            if (verify_) {
+                const char* names[5] = {"gdn", "ple", "tails", "dead", "block_pos"};
+                std::vector<uint8_t>* got[5] = {&c_.gdn, &c_.ple, &c_.tails, &c_.dead, &c_.block_pos};
+                std::vector<uint8_t>* want[5] = {&ref_.gdn, &ref_.ple, &ref_.tails, &ref_.dead, &ref_.block_pos};
+                size_t bytes = 0;
+                std::string diff;
+                for (int k = 0; k < 5; ++k) {
+                    bytes += want[k]->size();
+                    if (*got[k] == *want[k]) continue;
+                    size_t at = 0;
+                    while (at < got[k]->size() && at < want[k]->size() && (*got[k])[at] == (*want[k])[at]) ++at;
+                    char b[128];
+                    std::snprintf(b, sizeof b, "%s%s differs from byte %zu (%zu vs %zu bytes)", diff.empty() ? "" : ", ",
+                                  names[k], at, got[k]->size(), want[k]->size());
+                    diff += b;
+                }
+                char b[160];
+                if (diff.empty()) {
+                    std::snprintf(b, sizeof b, "%zu bytes, identical to the synchronous save", bytes);
+                    note_ = b;
+                } else {   // the synchronous copy is kept: the cache never holds bytes the save would not have
+                    note_ = "DIFFERS from the synchronous save: " + diff + "; the synchronous copy is kept";
+                    for (int k = 0; k < 5; ++k) got[k]->swap(*want[k]);
+                }
+            }
+        } catch (...) {
+            thrown_ = std::current_exception();
+        }
+    }
+    int dev_ = -1;
+    void* stage_ = nullptr;
+    size_t cap_ = 0;
+    cudaStream_t stream_ = nullptr;
+    cudaEvent_t small_ev_ = nullptr, gdn_ev_ = nullptr;
+    bool pending_ = false, landed_ = false;   // (the serve loop's thread only)
+    // the checkpoint in flight: the thread's while busy_, the serve loop's otherwise
+    ConvCheckpoint c_, ref_;
+    bool verify_ = false;
+    strata::core::ConversationCheckpointLayout lay_;
+    int64_t L_ = 0;
+    bool as_tail_ = false;
+    std::string job_err_, note_;
+    std::exception_ptr thrown_;
+    Clock::time_point t_begin_{};
+    double job_ms_ = 0.0;
+    std::mutex mu_;
+    std::condition_variable go_cv_, done_cv_;
+    bool busy_ = false, job_ = false, quit_ = false;
+    std::thread th_;   // last: started once the members above exist
 };
 
 /// STRATA_CKPT_THREADS: runs job(0) on the calling thread and job(k), k = 1..n-1, on persistent thread k at the same
@@ -9362,6 +9618,28 @@ int main(int argc, char** argv) {
         // STRATA_CKPT_POOL: the dropped checkpoints' storage, reused.  STRATA_SLOT_CKPT_MOVE turns it on too: a moved
         // checkpoint frees nothing at the next prune, so every save would fault in fresh pages (17 -> 40-60 ms)
         CheckpointPool ckpt_pool(ckpt_pool_env() || slot_ckpt_move_env());
+        // STRATA_CKPT_ASYNC: the turn checkpoint's pinned staging buffer (one checkpoint's running state), its stream and
+        // its thread, allocated here so that the conversation cache below is sized from the RAM left after it.  One GPU
+        // only: a layer split's checkpoints are assembled from its stages' parts
+        AsyncCheckpoint ckpt_async;
+        if (ckpt_async_env() && o.serve && o.prompt_cache > 0) {
+            strata::core::ConversationCheckpointLayout lay;
+            std::string why;
+            const Clock::time_point t0 = Clock::now();
+            if (!stages.empty())
+                std::fprintf(stderr, "strata serve: STRATA_CKPT_ASYNC=1 ignored: one GPU only (a layer split's checkpoints "
+                                     "are saved from its stages' parts)\n");
+            else if (!strata::core::conversation_checkpoint_layout(ss, g, 0, lay, why) || !ckpt_async.init(lay.bytes, why))
+                std::fprintf(stderr, "strata serve: STRATA_CKPT_ASYNC=1 off, every checkpoint is saved synchronously: %s\n",
+                             why.c_str());
+            else
+                std::fprintf(stderr, "strata serve: STRATA_CKPT_ASYNC=1: the turn checkpoint is copied out through a pinned "
+                                     "staging buffer of %.1f MiB (allocated in %.1f ms) while the header windows read%s\n",
+                             (double) lay.bytes / 1048576.0,
+                             std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
+                             ckpt_async_verify_env() ? "; STRATA_CKPT_ASYNC_VERIFY=1: each one is compared with a "
+                                                       "synchronous save" : "");
+        }
         uint64_t check_clock = 0;   // the checkpoints' LRU clock; creation and every use advance it
         int64_t tail_ckpt_len = -1;   // --prompt-cache-tail: the length of the one tail checkpoint alive (-1 = none)
         // --prefill-pipe: the plan of the prompt segment being read (read_part sets it around its runs), for the
@@ -9698,8 +9976,99 @@ int main(int argc, char** argv) {
             return false;
         };
         StageThreads ckpt_threads;   // STRATA_CKPT_THREADS: the later stages' parts of a checkpoint (started on first use)
-        auto checkpoint_at = [&](int64_t L, std::vector<ConvCheckpoint>* parts = nullptr, bool as_tail = false) -> bool {
+        // what follows a checkpoint's save: its LRU stamp, the one tail checkpoint, the chain and its evictions (a
+        // STRATA_CKPT_ASYNC checkpoint gets it once it is whole; nothing touched the chain or the stamps meanwhile)
+        auto keep_checkpoint = [&](ConvCheckpoint&& c, int64_t L, bool as_tail) {
+            c.used = ++check_clock;
+            if (as_tail) {   // only one tail checkpoint stays alive: the previous request's goes
+                const int64_t old_tail = tail_ckpt_len;
+                auto old = [&](const ConvCheckpoint& k) { return old_tail >= 0 && (int64_t) k.ids.size() == old_tail; };
+                if (ckpt_pool.on())
+                    ckpt_pool.erase_if(checks, old);
+                else
+                    checks.erase(std::remove_if(checks.begin(), checks.end(), old), checks.end());
+                tail_ckpt_len = L;
+            } else if (L == tail_ckpt_len) {
+                tail_ckpt_len = -1;   // the flagged tail was dropped and a normal checkpoint takes its length
+            }
+            checks.push_back(std::move(c));
+            const Clock::time_point te0 = Clock::now();
+            const size_t before_evict = checks.size();
+            while ((int) checks.size() > o.prompt_cache) {
+                std::vector<uint64_t> stamps;
+                std::vector<char> is_tail;
+                stamps.reserve(checks.size());
+                for (const ConvCheckpoint& k : checks) {
+                    stamps.push_back(k.used);
+                    is_tail.push_back(tail_ckpt_len >= 0 && (int64_t) k.ids.size() == tail_ckpt_len);
+                }
+                // the tail checkpoint serves only a branch of the last request: it leaves before a periodic one
+                std::unique_ptr<bool[]> tail_flags(new bool[is_tail.size()]);
+                for (size_t i = 0; i < is_tail.size(); ++i) tail_flags[i] = is_tail[i] != 0;
+                // the pin=N prefix is never the victim (flags only when one is pinned: nothing changes without)
+                std::unique_ptr<bool[]> pin_flags;
+                for (const ConvCheckpoint& k : checks)
+                    if (k.pinned) {
+                        pin_flags.reset(new bool[checks.size()]);
+                        for (size_t i = 0; i < checks.size(); ++i) pin_flags[i] = checks[i].pinned;
+                        break;
+                    }
+                std::vector<int64_t> lens;
+                for (const ConvCheckpoint& k : checks) lens.push_back((int64_t) k.ids.size());
+                const size_t victim = o.prompt_cache_spread
+                    ? strata::program::conv_cache::spread_victim(lens.data(), stamps.data(), stamps.size(),
+                                                                 o.prompt_cache, tail_flags.get(), pin_flags.get())
+                    : strata::program::conv_cache::eviction_victim(stamps.data(), stamps.size(), o.prompt_cache,
+                                                                   tail_flags.get(), pin_flags.get());
+                ckpt_pool.give(std::move(checks[victim]));   // (STRATA_CKPT_POOL; else nothing)
+                checks.erase(checks.begin() + (std::ptrdiff_t) victim);
+            }
+            if (ckpt_trace && checks.size() < before_evict) {
+                const double ms = std::chrono::duration<double, std::milli>(Clock::now() - te0).count();
+                req_times.evict_ms += ms;
+                std::fprintf(stderr, "strata trace: checkpoint at %lld: %zu evicted in %.1f ms\n", (long long) L,
+                             before_evict - checks.size(), ms);
+            }
+        };
+        // STRATA_CKPT_ASYNC: the checkpoint in flight joins the chain, whole (nothing to do without one).  False: its copy
+        // failed (ckpt_why says how)
+        auto ckpt_async_join = [&]() -> bool {
+            if (!ckpt_async.pending()) return true;
+            const Clock::time_point t0 = Clock::now();
+            ConvCheckpoint c;
+            int64_t L = 0;
+            bool as_tail = false;
+            std::string why, note;
+            double job_ms = 0.0;
+            if (!ckpt_async.finish(c, L, as_tail, why, note, job_ms)) {
+                ckpt_why = ": its copy through the pinned staging buffer failed (" + why + ")";
+                return false;
+            }
+            if (ckpt_trace) {
+                const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+                req_times.save_ms += ms;
+                std::fprintf(stderr, "strata trace: checkpoint at %lld: whole %.1f ms after it was queued, %.1f ms waited for "
+                                     "(STRATA_CKPT_ASYNC)\n", (long long) L, job_ms, ms);
+            }
+            if (!note.empty())
+                std::fprintf(stderr, "strata serve: STRATA_CKPT_ASYNC_VERIFY: checkpoint at %lld: %s\n", (long long) L,
+                             note.c_str());
+            keep_checkpoint(std::move(c), L, as_tail);
+            return true;
+        };
+        // STRATA_CKPT_ASYNC: the checkpoint in flight has its GDN rows out before anything writes them (a commit, a
+        // one-token window); at once without one
+        auto ckpt_async_fence = [&](std::string& e) -> bool {
+            std::string why;
+            if (ckpt_async.fence(why)) return true;
+            e = "saving a conversation checkpoint failed: its copy through the pinned staging buffer failed (" + why + ")";
+            return false;
+        };
+        // `async_ok` (STRATA_CKPT_ASYNC, the turn checkpoint): on one GPU it is copied out while the next part reads
+        auto checkpoint_at = [&](int64_t L, std::vector<ConvCheckpoint>* parts = nullptr, bool as_tail = false,
+                                 bool async_ok = false) -> bool {
             ckpt_why.clear();
+            if (!ckpt_async_join()) return false;   // STRATA_CKPT_ASYNC: the one in flight first
             if (o.prompt_cache <= 0 || L < 1) return true;
             for (ConvCheckpoint& c : checks)
                 if ((int64_t) c.ids.size() == L) {
@@ -9718,6 +10087,40 @@ int main(int argc, char** argv) {
                 c.dead = std::move((*parts)[0].dead);
                 c.block_pos = std::move((*parts)[0].block_pos);
                 for (size_t i = 1; i < parts->size(); ++i) c.stage_parts.push_back(std::move((*parts)[i]));
+            } else if (async_ok && !as_tail && ckpt_async.on() && stages.empty()) {
+                // STRATA_CKPT_ASYNC: the device synchronized as below, the copies queued into the pinned staging
+                // buffer; the parts a window's run writes are out when begin() returns, the GDN rows before the next
+                // commit (ckpt_async_fence), and the checkpoint joins the chain when it is whole (ckpt_async_join)
+                const Clock::time_point t0 = Clock::now();
+                if (!gpu_sync_ok()) return false;
+                const Clock::time_point t1 = Clock::now();
+                const bool verify = ckpt_async_verify_env();
+                ConvCheckpoint ref;   // STRATA_CKPT_ASYNC_VERIFY: the synchronous save, compared with when it joins
+                if (verify) {
+                    ref.ids = c.ids;
+                    if (!checkpoint_save(ref, ss, g)) return false;
+                }
+                const bool reused = !c.gdn.empty();   // (a pooled one)
+                c.stage_parts.clear();
+                if (seg_plan.chunk > 0 && L > seg_plan.from && L < seg_plan.to) c.plan = seg_plan;   // as below, now
+                std::string why;
+                if (ckpt_async.begin(c, std::move(ref), verify, L, as_tail, ss, g, why)) {
+                    if (ckpt_trace) {
+                        const double sync_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                        const double queued_ms = std::chrono::duration<double, std::milli>(Clock::now() - t1).count();
+                        ++req_times.ckpts;
+                        req_times.sync_ms += sync_ms;
+                        req_times.save_ms += queued_ms;
+                        std::fprintf(stderr, "strata trace: checkpoint at %lld: sync %.1f ms, queued %.1f ms (STRATA_CKPT_ASYNC, "
+                                             "%s%s)\n", (long long) L, sync_ms, queued_ms,
+                                     reused ? "into a dropped checkpoint's vectors" : "new vectors",
+                                     verify ? ", the synchronous save beside it" : "");
+                    }
+                    return true;
+                }
+                std::fprintf(stderr, "strata serve: STRATA_CKPT_ASYNC: the checkpoint at %lld is saved synchronously: %s\n",
+                             (long long) L, why.c_str());
+                if (!checkpoint_save(c, ss, g)) return false;   // (the device is synchronized)
             } else if (ckpt_pool.on() || ckpt_threads_env()) {
                 // STRATA_CKPT_POOL / STRATA_CKPT_THREADS: the parts go into the vectors a pooled checkpoint already has
                 // (none resized), with the threads all at once; part k is stage k's session, synchronized first
@@ -9810,57 +10213,8 @@ int main(int argc, char** argv) {
                                  (long long) L, sync_ms, save_ms, stages.size() + 1);
                 }
             }
-            c.used = ++check_clock;
             if (seg_plan.chunk > 0 && L > seg_plan.from && L < seg_plan.to) c.plan = seg_plan;   // inside a planned segment
-            if (as_tail) {   // only one tail checkpoint stays alive: the previous request's goes
-                const int64_t old_tail = tail_ckpt_len;
-                auto old = [&](const ConvCheckpoint& k) { return old_tail >= 0 && (int64_t) k.ids.size() == old_tail; };
-                if (ckpt_pool.on())
-                    ckpt_pool.erase_if(checks, old);
-                else
-                    checks.erase(std::remove_if(checks.begin(), checks.end(), old), checks.end());
-                tail_ckpt_len = L;
-            } else if (L == tail_ckpt_len) {
-                tail_ckpt_len = -1;   // the flagged tail was dropped and a normal checkpoint takes its length
-            }
-            checks.push_back(std::move(c));
-            const Clock::time_point te0 = Clock::now();
-            const size_t before_evict = checks.size();
-            while ((int) checks.size() > o.prompt_cache) {
-                std::vector<uint64_t> stamps;
-                std::vector<char> is_tail;
-                stamps.reserve(checks.size());
-                for (const ConvCheckpoint& k : checks) {
-                    stamps.push_back(k.used);
-                    is_tail.push_back(tail_ckpt_len >= 0 && (int64_t) k.ids.size() == tail_ckpt_len);
-                }
-                // the tail checkpoint serves only a branch of the last request: it leaves before a periodic one
-                std::unique_ptr<bool[]> tail_flags(new bool[is_tail.size()]);
-                for (size_t i = 0; i < is_tail.size(); ++i) tail_flags[i] = is_tail[i] != 0;
-                // the pin=N prefix is never the victim (flags only when one is pinned: nothing changes without)
-                std::unique_ptr<bool[]> pin_flags;
-                for (const ConvCheckpoint& k : checks)
-                    if (k.pinned) {
-                        pin_flags.reset(new bool[checks.size()]);
-                        for (size_t i = 0; i < checks.size(); ++i) pin_flags[i] = checks[i].pinned;
-                        break;
-                    }
-                std::vector<int64_t> lens;
-                for (const ConvCheckpoint& k : checks) lens.push_back((int64_t) k.ids.size());
-                const size_t victim = o.prompt_cache_spread
-                    ? strata::program::conv_cache::spread_victim(lens.data(), stamps.data(), stamps.size(),
-                                                                 o.prompt_cache, tail_flags.get(), pin_flags.get())
-                    : strata::program::conv_cache::eviction_victim(stamps.data(), stamps.size(), o.prompt_cache,
-                                                                   tail_flags.get(), pin_flags.get());
-                ckpt_pool.give(std::move(checks[victim]));   // (STRATA_CKPT_POOL; else nothing)
-                checks.erase(checks.begin() + (std::ptrdiff_t) victim);
-            }
-            if (ckpt_trace && checks.size() < before_evict) {
-                const double ms = std::chrono::duration<double, std::milli>(Clock::now() - te0).count();
-                req_times.evict_ms += ms;
-                std::fprintf(stderr, "strata trace: checkpoint at %lld: %zu evicted in %.1f ms\n", (long long) L,
-                             before_evict - checks.size(), ms);
-            }
+            keep_checkpoint(std::move(c), L, as_tail);
             return true;
         };
         // STRATA_SPLIT_MTP_BATCH=1 (default off): the layer split's drafter is on the last stage, so E-9 (Prefill::draft_kv)
@@ -13216,6 +13570,9 @@ int main(int argc, char** argv) {
                     drive.d.layers = 0;
                     drive.d.experts = 0;
                     drive.d.failed = false;
+                    // STRATA_CKPT_ASYNC: the turn checkpoint's GDN rows are out before a one-token window or a commit
+                    // writes the GDN state (a window of more tokens only reads it)
+                    if (T == 1 && !ckpt_async_fence(e)) return false;
                     if (!ver.run(T, win.data(), q, win_pool_fn, win_pool_user, outw.data(), e) || drive.d.failed) {
                         if (drive.d.failed && drive.d.fail) e = drive.d.fail;
                         return false;
@@ -13238,6 +13595,7 @@ int main(int argc, char** argv) {
                     }();
                     if (logpos != nullptr && !ver.window_logprobs(nxt.data(), T, q, logpos_extra, logpos, e))
                         return false;
+                    if (!ckpt_async_fence(e)) return false;   // (STRATA_CKPT_ASYNC, as above)
                     if (!ver.commit(T, e) || (use_mtp && !mtp.prefill(ver.final_R_all(), nxt.data(), T, q, e))) return false;
                     q += T;
                     pp_reached = q;   // #471
@@ -14066,6 +14424,12 @@ int main(int argc, char** argv) {
                 if (to <= at) continue;
                 err.clear();
                 const bool win = windows_ok(at, to);
+                // STRATA_CKPT_ASYNC: a batched part (its own streams, the chain's checkpoints) starts after the turn
+                // checkpoint is whole; windows read while it is copied out (read_windows waits before a commit)
+                if (!win && !ckpt_async_join()) {
+                    std::printf("ERR saving a conversation checkpoint failed%s\n", ckpt_why.c_str());
+                    return 1;
+                }
                 if (win && !refill(err)) {
                     std::printf("ERR refilling a lent slot failed: %s\n", err.c_str());
                     return 1;
@@ -14122,7 +14486,8 @@ int main(int argc, char** argv) {
                 }
                 at = to;
                 if ((to == turn_at || to == root_at || to == message_at || to == pin_at) &&
-                    !checkpoint_at(to, nullptr, to == message_at && to != turn_at && to != root_at && to != pin_at)) {   // the tail kind leaves first
+                    !checkpoint_at(to, nullptr, to == message_at && to != turn_at && to != root_at && to != pin_at,   // the tail kind leaves first
+                                   to == turn_at && to != root_at && to != message_at && to != pin_at)) {   // (STRATA_CKPT_ASYNC)
                     std::printf("ERR saving a conversation checkpoint failed%s\n", ckpt_why.c_str());
                     return 1;
                 }
@@ -14131,6 +14496,12 @@ int main(int argc, char** argv) {
                 if (trace && to == message_at)
                     std::fprintf(stderr, "strata serve: message boundary checkpoint: %lld tokens, %lld tail\n",
                                  (long long) message_at, (long long) (turn_at - message_at));
+            }
+            // STRATA_CKPT_ASYNC: the turn checkpoint is whole and in the chain before anything after the prompt read (a
+            // cancel and a non-finite window included)
+            if (!ckpt_async_join()) {
+                std::printf("ERR saving a conversation checkpoint failed%s\n", ckpt_why.c_str());
+                return 1;
             }
             if (!refill(err)) {
                 std::printf("ERR refilling a lent slot failed: %s\n", err.c_str());
