@@ -1,0 +1,333 @@
+{
+ "gate": [
+  {
+   "name": "tiny decode",
+   "kind": "greedy decode",
+   "pairs": [
+    1.0488069414316703,
+    1.0595077089532052
+   ],
+   "median": 1.0541573251924379,
+   "gated": true
+  },
+  {
+   "name": "cnt1k decode",
+   "kind": "greedy decode",
+   "pairs": [
+    0.9920582395764395,
+    0.9966733200266135
+   ],
+   "median": 0.9943657798015264,
+   "gated": true
+  },
+  {
+   "name": "cnt4k decode",
+   "kind": "greedy decode",
+   "pairs": [
+    0.9886135298057601,
+    1.004704301075269
+   ],
+   "median": 0.9966589154405145,
+   "gated": true
+  },
+  {
+   "name": "cnt32k decode",
+   "kind": "greedy decode",
+   "pairs": [
+    0.998062015503876,
+    1.003883495145631
+   ],
+   "median": 1.0009727553247534,
+   "gated": true
+  },
+  {
+   "name": "cnt128k decode",
+   "kind": "greedy decode",
+   "pairs": [
+    0.9987468671679198,
+    1.0031387319522913
+   ],
+   "median": 1.0009427995601055,
+   "gated": true
+  },
+  {
+   "name": "cnt256k decode",
+   "kind": "greedy decode",
+   "pairs": [
+    0.9987819732034104,
+    0.9993898718730932
+   ],
+   "median": 0.9990859225382518,
+   "gated": true
+  },
+  {
+   "name": "nat4k decode",
+   "kind": "greedy decode",
+   "pairs": [
+    1.004624735729387,
+    1.0325065274151437
+   ],
+   "median": 1.0185656315722653,
+   "gated": true
+  },
+  {
+   "name": "cnt4k prompt read",
+   "kind": "prompt read",
+   "pairs": [
+    1.074703557312253,
+    1.0664322000781554
+   ],
+   "median": 1.0705678786952042,
+   "gated": true
+  },
+  {
+   "name": "cnt32k prompt read",
+   "kind": "prompt read",
+   "pairs": [
+    1.0177004313550497,
+    1.032229051116774
+   ],
+   "median": 1.024964741235912,
+   "gated": true
+  },
+  {
+   "name": "cnt128k prompt read",
+   "kind": "prompt read",
+   "pairs": [
+    1.057499222736334,
+    1.0597208520588988
+   ],
+   "median": 1.0586100373976164,
+   "gated": true
+  },
+  {
+   "name": "cnt256k prompt read",
+   "kind": "prompt read",
+   "pairs": [
+    1.0668604396662666,
+    1.0789319068706975
+   ],
+   "median": 1.072896173268482,
+   "gated": true
+  },
+  {
+   "name": "T0",
+   "kind": "prompt ms (baseline / arm)",
+   "pairs": [
+    1.4045454545454545,
+    1.3108108108108107
+   ],
+   "median": 1.3576781326781326,
+   "gated": true
+  },
+  {
+   "name": "T1",
+   "kind": "prompt ms (baseline / arm)",
+   "pairs": [
+    1.1579225166262008,
+    1.1781530343007915
+   ],
+   "median": 1.168037775463496,
+   "gated": true
+  },
+  {
+   "name": "F",
+   "kind": "prompt ms (baseline / arm)",
+   "pairs": [
+    1.7561547479484174,
+    1.7217647058823529
+   ],
+   "median": 1.7389597269153851,
+   "gated": true
+  },
+  {
+   "name": "samp4k decode",
+   "kind": "sampled decode",
+   "pairs": [
+    1.0651538354448,
+    1.0162110179969777
+   ],
+   "median": 1.0406824267208887,
+   "gated": false
+  },
+  {
+   "name": "agent decode",
+   "kind": "sampled decode",
+   "pairs": [
+    1.1675461741424804,
+    0.9760201901592952
+   ],
+   "median": 1.0717831821508879,
+   "gated": false
+  }
+ ],
+ "fails": [],
+ "complete": true,
+ "metrics": {
+  "D_win": {
+   "pairs": [
+    0.9929035921403155,
+    1.0017471974407641
+   ],
+   "median": 0.9973253947905398,
+   "B": 169.4902146275773,
+   "N": 169.03489679176369
+  },
+  "D_real": {
+   "pairs": [
+    1.077035676035149,
+    1.0079643426852816
+   ],
+   "median": 1.0425000093602153,
+   "B": 100.74288807454104,
+   "N": 104.95882740671604
+  },
+  "D_SA": {
+   "pairs": [
+    1.1151754505219182,
+    0.995912883252035
+   ],
+   "median": 1.0555441668869765,
+   "B": 101.65246217594526,
+   "N": 107.06743249582615
+  },
+  "P": {
+   "pairs": [
+    1.0458136898393922,
+    1.0491912590024044
+   ],
+   "median": 1.0475024744208983,
+   "B": 1844.5653531401713,
+   "N": 1932.1789206219278
+  },
+  "F": {
+   "pairs": [
+    1.7561547479484174,
+    1.7217647058823529
+   ],
+   "median": 1.7389597269153851,
+   "B": 2961.5,
+   "N": 1703.0
+  },
+  "T0": {
+   "pairs": [
+    1.4045454545454545,
+    1.3108108108108107
+   ],
+   "median": 1.3576781326781326,
+   "B": 150.0,
+   "N": 110.5
+  },
+  "T1": {
+   "pairs": [
+    1.1579225166262008,
+    1.1781530343007915
+   ],
+   "median": 1.168037775463496,
+   "B": 11066.0,
+   "N": 9474.0
+  },
+  "R4": {
+   "pairs": [
+    1.074703557312253,
+    1.0664322000781554
+   ],
+   "median": 1.0705678786952042,
+   "B": 1454.8507166498366,
+   "N": 1557.5274895856985
+  },
+  "R32": {
+   "pairs": [
+    1.0177004313550497,
+    1.032229051116774
+   ],
+   "median": 1.024964741235912,
+   "B": 2338.6749572505096,
+   "N": 2397.004920920099
+  },
+  "R128": {
+   "pairs": [
+    1.057499222736334,
+    1.0597208520588988
+   ],
+   "median": 1.0586100373976164,
+   "B": 2217.5830801890907,
+   "N": 2347.5517943754176
+  },
+  "R256": {
+   "pairs": [
+    1.0668604396662666,
+    1.0789319068706975
+   ],
+   "median": 1.072896173268482,
+   "B": 2087.0319886039606,
+   "N": 2239.108143892948
+  }
+ },
+ "translation": [
+  {
+   "moment": "New session, first read",
+   "how": "T1: agent turn 1, 18,768 tokens read fresh (engine prompt ms)",
+   "production": 11066.0,
+   "combined": 9474.0,
+   "unit": "ms",
+   "change_pct": -14.386408819808421
+  },
+  {
+   "moment": "Follow-up turn read",
+   "how": "F: agent turn 2, 1,786 new tokens on the parked conversation (prompt ms)",
+   "production": 2961.5,
+   "combined": 1703.0,
+   "unit": "ms",
+   "change_pct": -42.495357082559515
+  },
+  {
+   "moment": "Short chat, first token",
+   "how": "T0: tiny prompts, median engine prompt ms",
+   "production": 150.0,
+   "combined": 110.5,
+   "unit": "ms",
+   "change_pct": -26.333333333333332
+  },
+  {
+   "moment": "Decode per token, agent turns",
+   "how": "1000 / pooled agent decode tok/s",
+   "production": 9.87651989139417,
+   "combined": 9.264186217326401,
+   "unit": "ms/token",
+   "change_pct": -6.199893087861045
+  },
+  {
+   "moment": "Decode per token, sampled thinking-on",
+   "how": "1000 / pooled samp4k decode tok/s",
+   "production": 9.79408375836213,
+   "combined": 9.414949702957175,
+   "unit": "ms/token",
+   "change_pct": -3.8710517977881462
+  },
+  {
+   "moment": "Decode per token, greedy natural text",
+   "how": "1000 / pooled nat4k decode tok/s",
+   "production": 10.095028412143288,
+   "combined": 9.913700639173452,
+   "unit": "ms/token",
+   "change_pct": -1.7962086441650476
+  },
+  {
+   "moment": "Long prompt read, 128K",
+   "how": "cnt128k run 2 prompt read",
+   "production": 2217.5830801890907,
+   "combined": 2347.5517943754176,
+   "unit": "tok/s",
+   "change_pct": 5.860827282973526
+  },
+  {
+   "moment": "Long prompt read, 256K",
+   "how": "cnt256k (1 run) prompt read",
+   "production": 2087.0319886039606,
+   "combined": 2239.108143892948,
+   "unit": "tok/s",
+   "change_pct": 7.286718944385375
+  }
+ ]
+}
