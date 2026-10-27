@@ -1,0 +1,1377 @@
+{
+ "reference": "c9c-01-B",
+ "arms": {
+  "c9c-01-B": {
+   "status": "reference"
+  },
+  "c9c-02-A32": {
+   "status": "ok",
+   "members": [
+    "A32"
+   ],
+   "exact_class": false,
+   "steps": {
+    "tiny:0": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      19,
+      19
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "tiny:1": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      19,
+      19
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 16,
+     "first_char": 102,
+     "tokens": [
+      64,
+      64
+     ]
+    },
+    "tiny:2": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      17,
+      17
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "tiny:3": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      51,
+      51
+     ],
+     "prompt": [
+      17,
+      17
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "stop",
+      "stop"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "tiny:4": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      18,
+      18
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 4,
+     "first_char": 15,
+     "tokens": [
+      64,
+      64
+     ]
+    },
+    "tiny:5": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      18,
+      18
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "id1k": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      83,
+      69
+     ],
+     "prompt": [
+      992,
+      992
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "stop",
+      "stop"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 23,
+     "first_char": 164,
+     "tokens": [
+      82,
+      68
+     ]
+    },
+    "id32k": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      256,
+      256
+     ],
+     "prompt": [
+      31473,
+      31473
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "agent:1": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      384,
+      384
+     ],
+     "prompt": [
+      18768,
+      18768
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 35,
+     "first_char": 165,
+     "tokens": [
+      384,
+      382
+     ]
+    },
+    "agent:2": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      384,
+      291
+     ],
+     "prompt": [
+      20553,
+      20553
+     ],
+     "reused": [
+      18763,
+      18763
+     ],
+     "finish": [
+      "length",
+      "tool_calls"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 0,
+     "first_char": 0,
+     "tokens": [
+      384,
+      215
+     ]
+    },
+    "id128k": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      143,
+      132
+     ],
+     "prompt": [
+      126970,
+      126970
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "stop",
+      "stop"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 0,
+     "first_char": 1,
+     "tokens": [
+      142,
+      131
+     ]
+    }
+   },
+   "needle": {
+    "rows": [
+     {
+      "length": "8k",
+      "depth": 10,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "meadow-copper-504",
+      "base_answer": "meadow-copper-504",
+      "prompt_tokens": [
+       6920,
+       6920
+      ]
+     },
+     {
+      "length": "8k",
+      "depth": 50,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "falcon-quartz-940",
+      "base_answer": "falcon-quartz-940",
+      "prompt_tokens": [
+       6920,
+       6920
+      ]
+     },
+     {
+      "length": "8k",
+      "depth": 90,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "willow-cobalt-696",
+      "base_answer": "willow-cobalt-696",
+      "prompt_tokens": [
+       6921,
+       6921
+      ]
+     },
+     {
+      "length": "16k",
+      "depth": 10,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "falcon-saffron-138",
+      "base_answer": "falcon-saffron-138",
+      "prompt_tokens": [
+       14988,
+       14988
+      ]
+     },
+     {
+      "length": "16k",
+      "depth": 50,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "quartz-tundra-528",
+      "base_answer": "quartz-tundra-528",
+      "prompt_tokens": [
+       14986,
+       14986
+      ]
+     },
+     {
+      "length": "16k",
+      "depth": 90,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "quartz-glacier-192",
+      "base_answer": "quartz-glacier-192",
+      "prompt_tokens": [
+       14986,
+       14986
+      ]
+     },
+     {
+      "length": "28k",
+      "depth": 10,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "tundra-falcon-946",
+      "base_answer": "tundra-falcon-946",
+      "prompt_tokens": [
+       27228,
+       27228
+      ]
+     },
+     {
+      "length": "28k",
+      "depth": 50,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "willow-glacier-745",
+      "base_answer": "willow-glacier-745",
+      "prompt_tokens": [
+       27228,
+       27228
+      ]
+     },
+     {
+      "length": "28k",
+      "depth": 90,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "falcon-juniper-150",
+      "base_answer": "falcon-juniper-150",
+      "prompt_tokens": [
+       27229,
+       27229
+      ]
+     }
+    ],
+    "ok": true,
+    "found": [
+     9,
+     9
+    ],
+    "all_answers_equal": true
+   },
+   "gated_identical": false,
+   "verdict": "PASS (needles right wherever B1 is right)",
+   "proof_ok": true,
+   "pcie_frac": "0.32",
+   "strata_env": {
+    "STRATA_TOPK_SPLIT": "1",
+    "STRATA_CKPT_POOL": "1",
+    "STRATA_SELECT_TWO_PASS": "1",
+    "STRATA_CKPT_ASYNC": "1",
+    "STRATA_PREFILL_CPU_SHARE": "0"
+   }
+  },
+  "c9c-03-A31": {
+   "status": "ok",
+   "members": [
+    "A31"
+   ],
+   "exact_class": false,
+   "steps": {
+    "tiny:0": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      19,
+      19
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 17,
+     "first_char": 67,
+     "tokens": [
+      64,
+      64
+     ]
+    },
+    "tiny:1": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      19,
+      19
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 16,
+     "first_char": 102,
+     "tokens": [
+      64,
+      64
+     ]
+    },
+    "tiny:2": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      17,
+      17
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 29,
+     "first_char": 113,
+     "tokens": [
+      64,
+      64
+     ]
+    },
+    "tiny:3": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      51,
+      51
+     ],
+     "prompt": [
+      17,
+      17
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "stop",
+      "stop"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "tiny:4": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      18,
+      18
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "tiny:5": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      18,
+      18
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 0,
+     "first_char": 1,
+     "tokens": [
+      64,
+      64
+     ]
+    },
+    "id1k": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      75,
+      69
+     ],
+     "prompt": [
+      992,
+      992
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "stop",
+      "stop"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 51,
+     "first_char": 321,
+     "tokens": [
+      74,
+      68
+     ]
+    },
+    "id32k": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      248,
+      256
+     ],
+     "prompt": [
+      31473,
+      31473
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "stop",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 72,
+     "first_char": 280,
+     "tokens": [
+      247,
+      256
+     ]
+    },
+    "agent:1": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      384,
+      384
+     ],
+     "prompt": [
+      18768,
+      18768
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 28,
+     "first_char": 136,
+     "tokens": [
+      357,
+      382
+     ]
+    },
+    "agent:2": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      243,
+      291
+     ],
+     "prompt": [
+      20553,
+      20553
+     ],
+     "reused": [
+      18763,
+      18763
+     ],
+     "finish": [
+      "tool_calls",
+      "tool_calls"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 10,
+     "first_char": 46,
+     "tokens": [
+      159,
+      215
+     ]
+    },
+    "id128k": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      146,
+      132
+     ],
+     "prompt": [
+      126970,
+      126970
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "stop",
+      "stop"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 0,
+     "first_char": 1,
+     "tokens": [
+      145,
+      131
+     ]
+    }
+   },
+   "needle": {
+    "rows": [
+     {
+      "length": "8k",
+      "depth": 10,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "meadow-copper-504",
+      "base_answer": "meadow-copper-504",
+      "prompt_tokens": [
+       6920,
+       6920
+      ]
+     },
+     {
+      "length": "8k",
+      "depth": 50,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "falcon-quartz-940",
+      "base_answer": "falcon-quartz-940",
+      "prompt_tokens": [
+       6920,
+       6920
+      ]
+     },
+     {
+      "length": "8k",
+      "depth": 90,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "willow-cobalt-696",
+      "base_answer": "willow-cobalt-696",
+      "prompt_tokens": [
+       6921,
+       6921
+      ]
+     },
+     {
+      "length": "16k",
+      "depth": 10,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "falcon-saffron-138",
+      "base_answer": "falcon-saffron-138",
+      "prompt_tokens": [
+       14988,
+       14988
+      ]
+     },
+     {
+      "length": "16k",
+      "depth": 50,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "quartz-tundra-528",
+      "base_answer": "quartz-tundra-528",
+      "prompt_tokens": [
+       14986,
+       14986
+      ]
+     },
+     {
+      "length": "16k",
+      "depth": 90,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "quartz-glacier-192",
+      "base_answer": "quartz-glacier-192",
+      "prompt_tokens": [
+       14986,
+       14986
+      ]
+     },
+     {
+      "length": "28k",
+      "depth": 10,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "tundra-falcon-946",
+      "base_answer": "tundra-falcon-946",
+      "prompt_tokens": [
+       27228,
+       27228
+      ]
+     },
+     {
+      "length": "28k",
+      "depth": 50,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "willow-glacier-745",
+      "base_answer": "willow-glacier-745",
+      "prompt_tokens": [
+       27228,
+       27228
+      ]
+     },
+     {
+      "length": "28k",
+      "depth": 90,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "falcon-juniper-150",
+      "base_answer": "falcon-juniper-150",
+      "prompt_tokens": [
+       27229,
+       27229
+      ]
+     }
+    ],
+    "ok": true,
+    "found": [
+     9,
+     9
+    ],
+    "all_answers_equal": true
+   },
+   "gated_identical": false,
+   "verdict": "PASS (needles right wherever B1 is right)",
+   "proof_ok": true,
+   "pcie_frac": "0.32",
+   "strata_env": {
+    "STRATA_TOPK_SPLIT": "1",
+    "STRATA_CKPT_POOL": "1",
+    "STRATA_SELECT_TWO_PASS": "1",
+    "STRATA_CKPT_ASYNC": "1",
+    "STRATA_PREFILL_CPU_SHARE": "0"
+   }
+  },
+  "c9c-04-B": {
+   "status": "ok",
+   "members": [],
+   "exact_class": false,
+   "steps": {
+    "tiny:0": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      19,
+      19
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "tiny:1": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      19,
+      19
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "tiny:2": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      17,
+      17
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "tiny:3": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      51,
+      51
+     ],
+     "prompt": [
+      17,
+      17
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "stop",
+      "stop"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "tiny:4": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      18,
+      18
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "tiny:5": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      64,
+      64
+     ],
+     "prompt": [
+      18,
+      18
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "id1k": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      69,
+      69
+     ],
+     "prompt": [
+      992,
+      992
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "stop",
+      "stop"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "id32k": {
+     "identical": true,
+     "counts_equal": true,
+     "generated": [
+      256,
+      256
+     ],
+     "prompt": [
+      31473,
+      31473
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "length",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": null,
+     "first_char": null
+    },
+    "agent:1": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      372,
+      384
+     ],
+     "prompt": [
+      18768,
+      18768
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "tool_calls",
+      "length"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 277,
+     "first_char": 1189,
+     "tokens": [
+      339,
+      382
+     ]
+    },
+    "agent:2": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      323,
+      291
+     ],
+     "prompt": [
+      20553,
+      20553
+     ],
+     "reused": [
+      18763,
+      18763
+     ],
+     "finish": [
+      "tool_calls",
+      "tool_calls"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 3,
+     "first_char": 15,
+     "tokens": [
+      268,
+      215
+     ]
+    },
+    "id128k": {
+     "identical": false,
+     "counts_equal": true,
+     "generated": [
+      146,
+      132
+     ],
+     "prompt": [
+      126970,
+      126970
+     ],
+     "reused": [
+      0,
+      0
+     ],
+     "finish": [
+      "stop",
+      "stop"
+     ],
+     "errors": [
+      null,
+      null
+     ],
+     "first_token": 0,
+     "first_char": 1,
+     "tokens": [
+      145,
+      131
+     ]
+    }
+   },
+   "needle": {
+    "rows": [
+     {
+      "length": "8k",
+      "depth": 10,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "meadow-copper-504",
+      "base_answer": "meadow-copper-504",
+      "prompt_tokens": [
+       6920,
+       6920
+      ]
+     },
+     {
+      "length": "8k",
+      "depth": 50,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "falcon-quartz-940",
+      "base_answer": "falcon-quartz-940",
+      "prompt_tokens": [
+       6920,
+       6920
+      ]
+     },
+     {
+      "length": "8k",
+      "depth": 90,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "willow-cobalt-696",
+      "base_answer": "willow-cobalt-696",
+      "prompt_tokens": [
+       6921,
+       6921
+      ]
+     },
+     {
+      "length": "16k",
+      "depth": 10,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "falcon-saffron-138",
+      "base_answer": "falcon-saffron-138",
+      "prompt_tokens": [
+       14988,
+       14988
+      ]
+     },
+     {
+      "length": "16k",
+      "depth": 50,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "quartz-tundra-528",
+      "base_answer": "quartz-tundra-528",
+      "prompt_tokens": [
+       14986,
+       14986
+      ]
+     },
+     {
+      "length": "16k",
+      "depth": 90,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "quartz-glacier-192",
+      "base_answer": "quartz-glacier-192",
+      "prompt_tokens": [
+       14986,
+       14986
+      ]
+     },
+     {
+      "length": "28k",
+      "depth": 10,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "tundra-falcon-946",
+      "base_answer": "tundra-falcon-946",
+      "prompt_tokens": [
+       27228,
+       27228
+      ]
+     },
+     {
+      "length": "28k",
+      "depth": 50,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "willow-glacier-745",
+      "base_answer": "willow-glacier-745",
+      "prompt_tokens": [
+       27228,
+       27228
+      ]
+     },
+     {
+      "length": "28k",
+      "depth": 90,
+      "base_found": true,
+      "arm_found": true,
+      "answers_equal": true,
+      "arm_answer": "falcon-juniper-150",
+      "base_answer": "falcon-juniper-150",
+      "prompt_tokens": [
+       27229,
+       27229
+      ]
+     }
+    ],
+    "ok": true,
+    "found": [
+     9,
+     9
+    ],
+    "all_answers_equal": true
+   },
+   "gated_identical": false,
+   "verdict": "control: DIFFERS from B1",
+   "proof_ok": true,
+   "pcie_frac": "0.32",
+   "strata_env": {
+    "STRATA_TOPK_SPLIT": "1",
+    "STRATA_CKPT_POOL": "1",
+    "STRATA_SELECT_TWO_PASS": "1",
+    "STRATA_CKPT_ASYNC": "1",
+    "STRATA_PREFILL_CPU_SHARE": "0"
+   }
+  }
+ }
+}

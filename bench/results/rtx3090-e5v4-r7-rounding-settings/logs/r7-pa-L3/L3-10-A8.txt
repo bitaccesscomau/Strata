@@ -1,0 +1,113 @@
+r7-pa-L3 / L3-10-A8
+setting       A8: args --spec 6 (replaces production --spec 4)
+output class  output-preserving, window shapes change (rounding-changing)
+role          X (candidate arm)
+lane          production lane (no lane flags)
+arm env/args  env {}; args added {}; args set {"--spec": "6"}
+window (UTC)  2026-10-26T12:29:24Z to 2026-10-26T12:31:58Z; status ok
+engine exe    <home>/strata-builds/v0.2.6-r5-4b7dcaf2/strata, sha256 26da5a7e53bf79a1023869b99216b1d2659be17f0558e4a2da5c3be35a6591ce; engine 0.1.51
+environ       STRATA_* of the engine process (/proc/<pid>/environ): STRATA_TOPK_SPLIT=1 STRATA_CKPT_POOL=1 STRATA_SELECT_TWO_PASS=1 STRATA_CKPT_ASYNC=1
+argv flags    from /proc/<pid>/cmdline: --spec 6, --spec-min-p 0.5
+engine /metrics at ready  expert_slots 10318, vram_free_mib 447, spec 8, mtp_max 6, pool_workers 30, pcie_frac 0.33, stream_all_min 1024, prefill_cap 8192, kv int8, kv_resident 32768, max_context 262144
+metrics (this arm, engine-measured; D, P, R in tok/s, F, T0, T1 in ms)  D_win 184.35  D_real 101.22  P 1841.1  F 3262.0  T0 150.0  T1 11069.0
+  note   F here is not valid for comparison: the bench label entered the filler, so arm labels of different length parked different conversation sizes (harness bug fixed from part 2a; RESULTS.md)
+pairs         L3-10-A8 vs L3-09-B (reversed (descriptive)); L3-10-A8 vs L3-11-B (reversed (descriptive))
+proof         harness verdict ok
+  want   'strata verify: window up to 8 tokens'                                 -> 1 line(s)
+  absent 'strata verify: window up to 6 tokens'                                 -> 0 line(s)
+
+== start-up and switch-proof lines (verbatim from the engine log, paths shortened) ==
+[strata] 2026-10-26 12:29:25 engine started: <home>/strata-builds/v0.2.6-r5-4b7dcaf2/strata --serve --pack <home>/Strata-data/packs/swift-iq3_xxs --native <home>/Strata-data/models/swift-IQ3_XXS/Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf --ple-gguf <home>/Strata-data/models/swift-IQ3_XXS/Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf --expert-profile <home>/Strata/data/expert-profile.bin --expert-cache auto --prefill auto --spec 6 --spec-min-p 0.5 --mtp <home>/Strata-data/mtp/rt --max-context 262144 --kv int8 --kv-resident 32768 --conversation-cache-min-tokens 2048 --conversation-cache-mib 8192
+strata: sm_86 (Ampere): 9 exact speed switches on by default (STRATA_SM86_PERF=0 turns them off; a switch you set is kept): ADAPT_NOWAIT ADAPT_LAG CPU_IQ_ALL_EXACT1 SIDE_MIXER ATTN_DAILY GR_UP75 GU_SWIGLU QSA_ROWS B6_MMVQ_ROWS
+strata generate: PCIe probe: 11.9 GB/s host->device (best of 11.9 11.9 11.8 11.7) -> pcie_frac 0.33 (default 0.55)
+strata generate: this CPU has no AVX-512: the expert kernels run on AVX-2 (multi-token for the i-quant gate/up rows)
+strata generate: PLE direct read probe: 78375 rows/s (fine)
+strata generate: the SSD is kept awake while rows are read: one page of the table after 100 ms without a read, until 60 s after the last request (STRATA_SSD_KEEPALIVE=0 turns it off)
+strata generate: KV streaming: 32768 of 262144 cells per QSA layer in VRAM, the K/V in 3.09 GiB of pinned RAM
+strata mtp: draft layer loaded, 837 MiB of VRAM (experts 675, dense 111), files read in 0.44 s (1768 MiB/s)
+strata generate: CPU pool tasks/phase: 93 (automatic), participating threads: 31
+strata generate: 30 pool workers on logical processors 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30, the host thread on 0 (draining too) (--host-core first)
+strata aux cpus: threads that are neither pool workers nor the host go to CPUs 31 (off at start; a request's aux_cpus=1 turns it on)
+strata generate: expert cache 10318 slots, 16.73 GiB of VRAM; policy is
+strata generate: session is up (engine 0.1.51)
+prefill: the CPU share is ON by default for prompt chunks below 1024 tokens (the idle CPU takes some of the experts the GPU would stream; answers can differ slightly from 0.1.40.3, mean KL ~0.004). STRATA_PREFILL_CPU_SHARE=0 turns it off.
+strata serve: prompt chunk auto: 8192 tokens, a 384-slot ring
+strata serve: the prompt path borrows 2588 CUDA0 cache slots (4.25 GiB)
+strata hc: CUDA0: the hyper-connection read runs as staged (the norm per token and stream, the down projection's activations staged ahead by cp.async); checked bit for bit against the plain read on this card (STRATA_HC_SPLIT=1 or 0 for the earlier ones)
+strata verify: window up to 8 tokens, 82.5 MiB of device buffers
+strata mtp: draft head over 106299 tokens (178.4 MiB)
+strata serve: STRATA_CKPT_ASYNC=1: the turn checkpoint is copied out through a pinned staging buffer of 112.6 MiB (allocated in 41.5 ms) while the header windows read
+strata serve: STRATA_ROUTE_TAIL_SKIP=7 is ON (default): a missed expert that every token of a verify window routes at rank 7 or lower is skipped (+10..20% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); STRATA_ROUTE_TAIL_SKIP=0 turns it off
+strata serve: adaptive overlap: off: not with STRATA_ADAPT_LAG / STRATA_ADAPT_NOWAIT
+strata serve: the adaptive tier's evictions reach the device's table before the next window (STRATA_ADAPT_EVICT_SYNC=0: when its copies land)
+strata serve: adaptive tier: blocking, and the asynchronous tier is tried once the session shows the swaps hold the windows up (--adapt-async 0 or STRATA_ADAPT_ASYNC=0: never)
+strata serve: 447 MiB of VRAM free with everything loaded
+
+== requests (engine log, in order; [label] = the harness step the line belongs to) ==
+[ready] strata serve: prompt 17 tokens = 0 reused + 17 read in 286 ms (59.4 tok/s), 2 generated in 92 ms (21.7 tok/s), drafts accepted 4 of 5, 1 checkpoints
+    strata serve: decode expert cache hit rate: 63.4% (1705 hits / 2689 lookups); 269 more read by the GPU over PCIe or from another GPU (9.1% of all 2958 routed)
+[tiny:0] strata serve: prompt 19 tokens = 0 reused + 19 read in 261 ms (72.9 tok/s), 64 generated in 957 ms (66.9 tok/s), drafts accepted 29 of 61, 1 checkpoints
+    strata serve: decode expert cache hit rate: 80.1% (32475 hits / 40559 lookups); 1403 more read by the GPU over PCIe or from another GPU (3.3% of all 41962 routed)
+    strata serve: PCIe share: the CPU pool takes 67 us per missed expert (26.0 GB/s of expert bytes), the link 11.9 GB/s -> pcie_frac 0.20 (was 0.33; --pcie-frac N fixes it, STRATA_PCIE_FRAC_DEFAULT=old keeps the start-up rule)
+[tiny:1] strata serve: prompt 19 tokens = 0 reused + 19 read in 169 ms (112.7 tok/s), 64 generated in 706 ms (90.6 tok/s), drafts accepted 37 of 62, 1 checkpoints
+    strata serve: decode expert cache hit rate: 86.5% (33983 hits / 39272 lookups); 387 more read by the GPU over PCIe or from another GPU (1.0% of all 39659 routed)
+[tiny:2] strata serve: prompt 17 tokens = 0 reused + 17 read in 150 ms (113.2 tok/s), 64 generated in 772 ms (82.9 tok/s), drafts accepted 33 of 93, 1 checkpoints
+    strata serve: decode expert cache hit rate: 95.0% (54706 hits / 57556 lookups); 34 more read by the GPU over PCIe or from another GPU (0.1% of all 57590 routed)
+[tiny:3] strata serve: prompt 17 tokens = 0 reused + 17 read in 150 ms (113.2 tok/s), 51 generated in 561 ms (90.9 tok/s), drafts accepted 42 of 61, 1 checkpoints
+    strata serve: decode expert cache hit rate: 78.8% (25323 hits / 32147 lookups); 631 more read by the GPU over PCIe or from another GPU (1.9% of all 32778 routed)
+[tiny:4] strata serve: prompt 18 tokens = 0 reused + 18 read in 119 ms (151.2 tok/s), 64 generated in 668 ms (95.8 tok/s), drafts accepted 38 of 79, 1 checkpoints
+    strata serve: decode expert cache hit rate: 93.6% (45462 hits / 48590 lookups); 35 more read by the GPU over PCIe or from another GPU (0.1% of all 48625 routed)
+[tiny:5] strata serve: prompt 18 tokens = 0 reused + 18 read in 119 ms (151.6 tok/s), 64 generated in 716 ms (89.3 tok/s), drafts accepted 36 of 93, 1 checkpoints
+    strata serve: decode expert cache hit rate: 95.3% (53476 hits / 56118 lookups); 43 more read by the GPU over PCIe or from another GPU (0.1% of all 56161 routed)
+[probe] strata serve: prompt 471 tokens = 0 reused + 471 read in 1034 ms (455.3 tok/s), 1 generated in 13 ms (78.4 tok/s), drafts accepted 0 of 0, 1 checkpoints
+    strata serve: decode expert cache hit rate: 91.8% (414 hits / 451 lookups)
+[probe] strata serve: prompt 1695 tokens = 0 reused + 1695 read in 2551 ms (664.4 tok/s), 1 generated in 13 ms (78.2 tok/s), drafts accepted 0 of 0, 1 checkpoints
+    strata serve: decode expert cache hit rate: 91.0% (414 hits / 455 lookups)
+[cnt1k run 1] strata serve: prompt 947 tokens = 0 reused + 947 read in 1315 ms (720.4 tok/s), 256 generated in 1969 ms (130.0 tok/s), drafts accepted 214 of 215, 1 checkpoints
+    strata serve: decode expert cache hit rate: 76.4% (83517 hits / 109338 lookups); 2826 more read by the GPU over PCIe or from another GPU (2.5% of all 112164 routed)
+[probe] strata serve: prompt 471 tokens = 0 reused + 471 read in 811 ms (580.7 tok/s), 1 generated in 12 ms (80.7 tok/s), drafts accepted 0 of 0, 1 checkpoints
+    strata serve: decode expert cache hit rate: 98.3% (451 hits / 459 lookups)
+[probe] strata serve: prompt 1695 tokens = 0 reused + 1695 read in 2550 ms (664.6 tok/s), 1 generated in 12 ms (84.9 tok/s), drafts accepted 0 of 0, 1 checkpoints
+    strata serve: decode expert cache hit rate: 98.9% (461 hits / 466 lookups)
+[cnt1k run 2] strata serve: prompt 947 tokens = 0 reused + 947 read in 1238 ms (765.1 tok/s), 256 generated in 1404 ms (182.4 tok/s), drafts accepted 215 of 215, 1 checkpoints
+    strata serve: decode expert cache hit rate: 94.1% (111541 hits / 118520 lookups); 428 more read by the GPU over PCIe or from another GPU (0.4% of all 118948 routed)
+[probe] strata serve: prompt 471 tokens = 0 reused + 471 read in 808 ms (582.6 tok/s), 1 generated in 11 ms (93.0 tok/s), drafts accepted 0 of 0, 1 checkpoints
+    strata serve: decode expert cache hit rate: 99.4% (467 hits / 470 lookups)
+[probe] strata serve: prompt 1695 tokens = 0 reused + 1695 read in 2551 ms (664.3 tok/s), 1 generated in 11 ms (87.5 tok/s), drafts accepted 0 of 0, 1 checkpoints
+    strata serve: decode expert cache hit rate: 99.2% (468 hits / 472 lookups)
+[cnt4k run 1] strata serve: prompt 4007 tokens = 0 reused + 4007 read in 2732 ms (1466.8 tok/s), 256 generated in 1348 ms (189.9 tok/s), drafts accepted 213 of 215, 1 checkpoints
+    strata serve: decode expert cache hit rate: 97.9% (119116 hits / 121678 lookups); 56 more read by the GPU over PCIe or from another GPU (0.0% of all 121734 routed)
+[probe] strata serve: prompt 471 tokens = 0 reused + 471 read in 952 ms (494.9 tok/s), 1 generated in 12 ms (82.7 tok/s), drafts accepted 0 of 0, 1 checkpoints
+    strata serve: decode expert cache hit rate: 99.2% (471 hits / 475 lookups)
+[probe] strata serve: prompt 1695 tokens = 0 reused + 1695 read in 2547 ms (665.6 tok/s), 1 generated in 11 ms (88.8 tok/s), drafts accepted 0 of 0, 1 checkpoints
+    strata serve: decode expert cache hit rate: 99.6% (473 hits / 475 lookups)
+[cnt4k run 2] strata serve: prompt 4007 tokens = 0 reused + 4007 read in 2739 ms (1463.1 tok/s), 256 generated in 1331 ms (192.4 tok/s), drafts accepted 215 of 215, 1 checkpoints
+    strata serve: decode expert cache hit rate: 98.9% (121449 hits / 122774 lookups); 15 more read by the GPU over PCIe or from another GPU (0.0% of all 122789 routed)
+[probe] strata serve: prompt 478 tokens = 0 reused + 478 read in 989 ms (483.2 tok/s), 1 generated in 11 ms (91.5 tok/s), drafts accepted 0 of 0, 1 checkpoints
+    strata serve: decode expert cache hit rate: 100.0% (475 hits / 475 lookups)
+[probe] strata serve: prompt 1720 tokens = 0 reused + 1720 read in 2548 ms (674.9 tok/s), 1 generated in 11 ms (89.4 tok/s), drafts accepted 0 of 0, 1 checkpoints
+    strata serve: decode expert cache hit rate: 100.0% (478 hits / 478 lookups)
+[cnt32k run 1] strata serve: prompt 32080 tokens = 0 reused + 32080 read in 13807 ms (2323.5 tok/s), 256 generated in 1399 ms (183.0 tok/s), drafts accepted 215 of 215, 2 checkpoints
+    strata serve: decode expert cache hit rate: 99.1% (121747 hits / 122861 lookups); 13 more read by the GPU over PCIe or from another GPU (0.0% of all 122874 routed)
+[probe] strata serve: prompt 478 tokens = 0 reused + 478 read in 1290 ms (370.6 tok/s), 1 generated in 11 ms (88.2 tok/s), drafts accepted 0 of 0, 1 checkpoints
+    strata serve: decode expert cache hit rate: 100.0% (477 hits / 477 lookups)
+[probe] strata serve: prompt 1720 tokens = 0 reused + 1720 read in 2547 ms (675.4 tok/s), 1 generated in 12 ms (83.2 tok/s), drafts accepted 0 of 0, 1 checkpoints
+    strata serve: decode expert cache hit rate: 100.0% (480 hits / 480 lookups)
+[cnt32k run 2] strata serve: prompt 32080 tokens = 0 reused + 32080 read in 13846 ms (2316.9 tok/s), 256 generated in 1433 ms (178.7 tok/s), drafts accepted 216 of 220, 2 checkpoints
+    strata serve: decode expert cache hit rate: 99.2% (125019 hits / 125995 lookups); 8 more read by the GPU over PCIe or from another GPU (0.0% of all 126003 routed)
+[nat4k:1] strata serve: prompt 3828 tokens = 0 reused + 3828 read in 3509 ms (1090.8 tok/s), 384 generated in 4598 ms (83.5 tok/s), drafts accepted 225 of 450, 1 checkpoints
+    strata serve: decode expert cache hit rate: 86.4% (237095 hits / 274469 lookups); 2268 more read by the GPU over PCIe or from another GPU (0.8% of all 276737 routed)
+[nat4k:2] strata serve: prompt 3828 tokens = 0 reused + 3828 read in 2879 ms (1329.6 tok/s), 384 generated in 3610 ms (106.4 tok/s), drafts accepted 234 of 407, 1 checkpoints
+    strata serve: decode expert cache hit rate: 97.5% (255473 hits / 262089 lookups); 112 more read by the GPU over PCIe or from another GPU (0.0% of all 262201 routed)
+[samp4k:4242] strata serve: prompt 3971 tokens = 0 reused + 3971 read in 3330 ms (1192.3 tok/s), 256 generated in 2599 ms (98.5 tok/s), drafts accepted 132 of 194, 1 checkpoints
+    strata serve: decode expert cache hit rate: 93.7% (137454 hits / 146662 lookups); 368 more read by the GPU over PCIe or from another GPU (0.3% of all 147030 routed)
+[samp4k:4243] strata serve: prompt 3971 tokens = 3966 reused + 5 read in 112 ms (44.7 tok/s), 256 generated in 2198 ms (116.5 tok/s), drafts accepted 160 of 229, 1 checkpoints
+    strata serve: decode expert cache hit rate: 96.8% (146792 hits / 151599 lookups); 144 more read by the GPU over PCIe or from another GPU (0.1% of all 151743 routed)
+[samp4k:4244] strata serve: prompt 3971 tokens = 3966 reused + 5 read in 107 ms (46.7 tok/s), 256 generated in 2517 ms (101.7 tok/s), drafts accepted 143 of 252, 1 checkpoints
+    strata serve: decode expert cache hit rate: 97.5% (166899 hits / 171196 lookups); 110 more read by the GPU over PCIe or from another GPU (0.1% of all 171306 routed)
+[agent:1] strata serve: prompt 18768 tokens = 0 reused + 18768 read in 11069 ms (1695.6 tok/s), 384 generated in 3622 ms (106.0 tok/s), drafts accepted 256 of 443, 3 checkpoints
+    strata serve: decode expert cache hit rate: 94.7% (251820 hits / 265937 lookups); 666 more read by the GPU over PCIe or from another GPU (0.2% of all 266603 routed)
+[agent:2] strata serve: prompt 20553 tokens = 18763 reused + 1790 read in 3262 ms (548.8 tok/s), 247 generated in 2356 ms (104.8 tok/s), drafts accepted 157 of 269, 4 checkpoints
+    strata serve: decode expert cache hit rate: 95.9% (161270 hits / 168188 lookups); 317 more read by the GPU over PCIe or from another GPU (0.2% of all 168505 routed)
+
+request lines: 32; harness steps matched 19 of 19; unlabelled non-probe lines 0

@@ -1,0 +1,135 @@
+{
+ "verdicts": {
+  "A23": {
+   "label": "L9-02-A23",
+   "gate": "no measurable effect",
+   "d_win": [
+    0.9936151168498383,
+    0.9966876156438015
+   ],
+   "d_real": [
+    1.0200552137532972,
+    1.0322640984017952
+   ],
+   "d_real_condition": "holds",
+   "reversed_d_win": [
+    0.9995357169823211,
+    1.0004382590291991
+   ],
+   "verdict": "no measurable effect",
+   "valid": true
+  },
+  "A24": {
+   "label": "L9-04-A24",
+   "gate": "confirm (mixed)",
+   "d_win": [
+    1.016495146515794,
+    1.0201174338291745
+   ],
+   "d_real": [
+    1.063076719771041,
+    1.040562450208141
+   ],
+   "d_real_condition": "holds",
+   "reversed_d_win": [
+    1.013971789592089,
+    1.010180829078084
+   ],
+   "verdict": "confirm (confirmation batch owed)",
+   "valid": true
+  },
+  "A25": {
+   "label": "L9-06-A25",
+   "gate": "confirm (literal \"otherwise\"; both pairs below 0.98)",
+   "d_win": [
+    0.9657375344598726,
+    0.9687410185010965
+   ],
+   "d_real": [
+    0.9852111639781389,
+    0.9763907217041548
+   ],
+   "d_real_condition": "FAILS",
+   "reversed_d_win": [
+    0.9643444176497605,
+    0.9625964577707452
+   ],
+   "verdict": "regression: D_win 0.98 below in both pairs and the D_real condition fails (not a candidate)",
+   "valid": true
+  }
+ },
+ "pairs": [
+  {
+   "arm": "L9-02-A23",
+   "base": "L9-01-B",
+   "tag": "baseline then arm",
+   "screen": true
+  },
+  {
+   "arm": "L9-02-A23",
+   "base": "L9-03-B",
+   "tag": "arm then baseline",
+   "screen": true
+  },
+  {
+   "arm": "L9-04-A24",
+   "base": "L9-03-B",
+   "tag": "baseline then arm",
+   "screen": true
+  },
+  {
+   "arm": "L9-04-A24",
+   "base": "L9-05-B",
+   "tag": "arm then baseline",
+   "screen": true
+  },
+  {
+   "arm": "L9-06-A25",
+   "base": "L9-05-B",
+   "tag": "baseline then arm",
+   "screen": true
+  },
+  {
+   "arm": "L9-06-A25",
+   "base": "L9-07-B",
+   "tag": "arm then baseline",
+   "screen": true
+  },
+  {
+   "arm": "L9-08-A25",
+   "base": "L9-07-B",
+   "tag": "baseline then arm",
+   "screen": false
+  },
+  {
+   "arm": "L9-08-A25",
+   "base": "L9-09-B",
+   "tag": "arm then baseline",
+   "screen": false
+  },
+  {
+   "arm": "L9-10-A24",
+   "base": "L9-09-B",
+   "tag": "baseline then arm",
+   "screen": false
+  },
+  {
+   "arm": "L9-10-A24",
+   "base": "L9-11-B",
+   "tag": "arm then baseline",
+   "screen": false
+  },
+  {
+   "arm": "L9-12-A23",
+   "base": "L9-11-B",
+   "tag": "baseline then arm",
+   "screen": false
+  },
+  {
+   "arm": "L9-12-A23",
+   "base": "L9-13-B",
+   "tag": "arm then baseline",
+   "screen": false
+  }
+ ]
+}
