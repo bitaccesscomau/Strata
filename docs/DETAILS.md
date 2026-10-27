@@ -935,6 +935,15 @@ the ties are exactly the 3xTF32 scorer's (the bound and the rule: `include/strat
 `STRATA_SELECT_TWO_PASS_MIN` blocks or more take it (default 4096, 16K cells). `STRATA_SELECT_TWO_PASS_CHECK=1` (a slow
 diagnostic) runs the 3xTF32 scorer beside it and prints, after each prompt, the queries whose ids differ (must be 0).
 
+`STRATA_PREFILL_ROUTED_STREAM=1` (opt-in; the streamed prompt walk of a chunk of 1,024 tokens or more, one GPU, the issuer
+thread): the issuer keeps at most `STRATA_PREFILL_ROUTED_STREAM_DEPTH` copies (default 16) queued ahead of the PCIe link,
+each layer's routing is handed to it as soon as the layer's router has run, and an expert not yet copied that no token of
+the chunk routes to is not copied at all. The routed experts go into the same ring slots as without the switch, so the
+prompt's results are the same bits, and the slots the prompt borrowed are refilled from RAM as before. With `STRATA_TRACE=1`
+each chunk prints how many ring entries it copied and how many it dropped. On an RTX 3090 with the Swift IQ3_XXS pack, 15%
+(8,192-token chunks) to 47% (a 1,045-token read) of the streamed experts have no token routed to them; the time this saves
+is not measured yet.
+
 ### RTX 20 (Turing, sm_75) kernels (opt-in)
 
 Kernels by rafatxf (#2069-#2072, #2093, #2220-#2222), imanu86 (#2081) and xrip (#1821) for compute capability 7.5 are bitwise
