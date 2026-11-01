@@ -83,6 +83,20 @@ size_t device_free_bytes();
 /// One piece of an expert blob that lives contiguously in a source's own memory: `n` bytes at `p`, to land `at` bytes into the blob.
 struct BlobPart { const uint8_t* p; uint64_t n; uint64_t at; };
 
+/// R9-hs-2 (STRATA_REFILL_COALESCE) predicate, header-only so the host test needs nothing:
+/// true when the parts land gaplessly from the slot's first byte and their sources are one
+/// contiguous host run, so a single copy moves the whole run.
+inline bool parts_run_contiguous(const BlobPart* parts, int n) {
+    uint64_t at = 0;
+    if (parts == nullptr || n <= 0) return false;
+    for (int i = 0; i < n; ++i) {
+        if (parts[i].at != at) return false;
+        if (i + 1 < n && parts[i].p + parts[i].n != parts[i + 1].p) return false;
+        at += parts[i].n;
+    }
+    return true;
+}
+
 class ExpertCache {
 public:
     ExpertCache() = default;

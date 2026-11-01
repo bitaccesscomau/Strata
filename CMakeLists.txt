@@ -1691,6 +1691,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(auto_cache_test PRIVATE include)
   add_test(NAME auto_cache_test COMMAND auto_cache_test)
 
+  # R9-hs-2: the queued-refill coalesce predicate (gapless run, contiguous sources); header-only, CPU
+  add_executable(refill_parts_test src/core/refill_parts_test.cpp)
+  target_include_directories(refill_parts_test PRIVATE include)
+  add_test(NAME refill_parts_test COMMAND refill_parts_test)
+
   # 0.2.7 (#3911): the qwen35 host sampler's penalties on a short (draft-vocab) logit row; header-only, CPU
   add_executable(qwen35_sampling_test src/qwen35/sampling_test.cpp)
   target_include_directories(qwen35_sampling_test PRIVATE include)
