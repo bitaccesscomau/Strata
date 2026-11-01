@@ -14942,7 +14942,17 @@ int main(int argc, char** argv) {
                     pp_exact = true;
                 }
                 // the batched prompt path (other streams), checkpoints and snapshots may follow: the last commit first
-                if (!ver.wait_commit(e)) return false;
+                // R9-ps-2 (opt-in, STRATA_COMMIT_DOUBLE=1, meaningful beside STRATA_COMMIT_ASYNC=1): keep batch
+                // k's commit event pending across the PP print and into batch k+1's issue. Stream order keeps
+                // commit k ahead of batch k+1's kernels on the same stream, and the mapped commit block is
+                // next written at batch k+1's per-chunk commit, which the host reaches only after that
+                // chunk's rows have landed, i.e. after the stream has run past commit k's graph. The decode
+                // path's own wait_commit drains the last commit before any window reads.
+                static const bool commit_double = [] {
+                    const char* v = std::getenv("STRATA_COMMIT_DOUBLE");
+                    return v != nullptr && std::atoi(v) == 1;
+                }();
+                if (!commit_double && !ver.wait_commit(e)) return false;
                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
                 std::printf("PP %lld %lld %.0f %.1f\n", (long long) b, (long long) pp_total, ms,
                             ms > 0.0 ? 1000.0 * (double) (b - pp_from) / ms : 0.0);
