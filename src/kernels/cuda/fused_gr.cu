@@ -1086,8 +1086,11 @@ __device__ __forceinline__ float dot8v(const uint4 w, const float4 x0, const flo
 }
 
 // Stage tile `h` of every token into `buf`: [T][2 planes][160 chunks] float4, plane 0 = floats 0-3 of a chunk.
+// R9-gpu-1: the stride is the block's thread count (NTH), default the stock THREADS; the stock call sites
+// keep the default and the same bits.
+template <int NTH = THREADS>
 __device__ __forceinline__ void stage_htile(const GrMulti& m, int T, int h, float4* buf, int t, int k0 = 0) {
-    for (int i = t; i < T * (H_TILE / 4); i += THREADS) {
+    for (int i = t; i < T * (H_TILE / 4); i += NTH) {
         const int k = i / (H_TILE / 4), s4 = i - k * (H_TILE / 4);   // s4: float4 of the tile, chunk s4/2, half s4&1
         const float* src = m.xn + (size_t) (k0 + k) * D + (size_t) h * H_TILE + (size_t) s4 * 4;
         cp_async16(buf + (size_t) k * (H_TILE / 4) + (s4 & 1) * (H_TILE / 8) + (s4 >> 1), src);
@@ -1157,6 +1160,85 @@ __global__ void __launch_bounds__(THREADS) gr_down_staged_kernel(GrMulti m) {
 #pragma unroll
     for (int k = 0; k < MAX_T; ++k) s[k] = (EXACT_T || k < T) ? warp_sum(acc[k]) : 0.0f;
     // lane k writes token k (every lane holds every sum after the xor reduction)
+#pragma unroll
+    for (int k = 0; k < MAX_T; ++k) {
+        if ((!EXACT_T && k >= T) || lane != k) continue;
+        if (inject_block) {
+            m.a[k0 + k].inject_out[row] = s[k];
+        } else {
+            const float x = s[k] / (float) HC;
+            m.a[k0 + k].lo[row] = x / (1.0f + __expf(-x));
+        }
+    }
+}
+
+// R9-gpu-1 (opt-in, STRATA_GR_DOWN_WARPS4=1, CUDA): the staged down with four warps per block. HC = 4,
+// so 80 main blocks of four rows plus one inject block cover all 320 rows and the four inject streams
+// exactly; the same dot8u, the same ascending tile/chunk loop per lane, the same xor reduction, the
+// same staging pattern (the stage stride is 128), and the same dynamic shared-memory size (the staging
+// buffers do not depend on the thread count). Two warps' worth of the activation staging is duplicated
+// per row-group pair - an explicit cost, priced by the premise gate, not assumed free.
+constexpr int DOWN_BLOCKS4 = LR / 4;         // 80 blocks of 4 rows; one more for the inject rows
+template <int MAX_T = kFusedGrMaxT, bool EXACT_T = false>
+__global__ void __launch_bounds__(128) gr_down_staged4_kernel(GrMulti m) {
+    extern __shared__ __align__(16) float4 hbuf[];      // 2 buffers x [T][2][160] float4
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    const int T = EXACT_T ? MAX_T : m.T;
+    const int k0 = EXACT_T ? (int) blockIdx.y * MAX_T : 0;
+    const bool inject_block = blockIdx.x == DOWN_BLOCKS4;
+    const int row = inject_block ? warp : blockIdx.x * 4 + warp;
+    const bool active = !(inject_block && (m.a[0].w_inject == nullptr || warp >= HC));
+    const uint16_t* wrow = (inject_block ? m.a[0].w_inject : m.a[0].w_down) + (size_t) (active ? row : 0) * D;
+    const uint4* w4 = reinterpret_cast<const uint4*>(wrow);
+    const size_t buf_f4 = (size_t) T * (H_TILE / 4);    // float4 per buffer (the second one follows the first)
+    float acc[MAX_T];
+#pragma unroll
+    for (int k = 0; k < MAX_T; ++k) acc[k] = 0.0f;
+    uint4 wv[HQ], wnext[HQ];
+    if (active) {
+#pragma unroll
+        for (int q = 0; q < HQ; ++q) wv[q] = __ldg(w4 + lane + 32 * q);
+    }
+    stage_htile<128>(m, T, 0, hbuf, t, k0);
+    cp_async_commit();
+    stage_htile<128>(m, T, 1, hbuf + buf_f4, t, k0);
+    cp_async_commit();
+#pragma unroll 1
+    for (int h = 0; h < N_HTILES; ++h) {
+        if (active && h + 1 < N_HTILES) {
+#pragma unroll
+            for (int q = 0; q < HQ; ++q) wnext[q] = __ldg(w4 + (h + 1) * (H_TILE / 8) + lane + 32 * q);
+        }
+        if (h + 1 < N_HTILES) cp_async_wait1();         // tile h has landed (h + 1 may still be on its way)
+        else cp_async_wait0();
+        __syncthreads();
+        const float4* cur = hbuf + (h & 1) * buf_f4;
+        if (active) {
+#pragma unroll
+            for (int q = 0; q < HQ; ++q) {
+                const int j = lane + 32 * q;
+                const Bf16x8 wvq = unpack8(wv[q]);
+#pragma unroll
+                for (int k = 0; k < MAX_T; ++k) {
+                    if (EXACT_T || k < T) {
+                        const float4* pk = cur + (size_t) k * (H_TILE / 4);
+                        acc[k] += dot8u(wvq, pk[j], pk[H_TILE / 8 + j]);
+                    }
+                }
+            }
+        }
+        __syncthreads();                                // every warp is done with buffer h & 1
+        if (h + 2 < N_HTILES) stage_htile<128>(m, T, h + 2, hbuf + (h & 1) * buf_f4, t, k0);
+        cp_async_commit();                              // an empty group at the end keeps the wait counts simple
+        if (h + 1 < N_HTILES) {
+#pragma unroll
+            for (int q = 0; q < HQ; ++q) wv[q] = wnext[q];
+        }
+    }
+    if (!active) return;
+    float s[MAX_T];
+#pragma unroll
+    for (int k = 0; k < MAX_T; ++k) s[k] = (EXACT_T || k < T) ? warp_sum(acc[k]) : 0.0f;
 #pragma unroll
     for (int k = 0; k < MAX_T; ++k) {
         if ((!EXACT_T && k >= T) || lane != k) continue;
@@ -1251,6 +1333,20 @@ int down_chunk(bool staged, int* tile_out) {
         set_staged_attr(gr_down_staged_kernel<6, true>, 6);
         set_staged_attr(gr_down_staged_kernel<4, false>, 4);
         set_staged_attr(gr_down_staged_kernel<kFusedGrMaxT, false>, kFusedGrMaxT);
+#if !defined(__HIPCC__)
+        // R9-gpu-1: the 4-warp instantiations need the same dynamic-shared-memory attributes when enabled
+        static const bool w4_attr = [] { const char* v = std::getenv("STRATA_GR_DOWN_WARPS4"); return v != nullptr && std::atoi(v) == 1; }();
+        if (w4_attr) {
+            set_staged_attr(gr_down_staged4_kernel<1, true>, 1);
+            set_staged_attr(gr_down_staged4_kernel<2, true>, 2);
+            set_staged_attr(gr_down_staged4_kernel<3, true>, 3);
+            set_staged_attr(gr_down_staged4_kernel<4, true>, 4);
+            set_staged_attr(gr_down_staged4_kernel<5, true>, 5);
+            set_staged_attr(gr_down_staged4_kernel<6, true>, 6);
+            set_staged_attr(gr_down_staged4_kernel<4, false>, 4);
+            set_staged_attr(gr_down_staged4_kernel<kFusedGrMaxT, false>, kFusedGrMaxT);
+        }
+#endif
         cudaGetLastError();      // drop any error the attempt left behind
         // The opt-in is a promise a pre-Volta card does not keep: an sm_60 answers 65536 and accepts the
         // cudaFuncSetAttribute for 61440 B, then fails the LAUNCH with "invalid argument".  What such a card
@@ -1295,6 +1391,19 @@ bool gr_down_max4() {
         return v != nullptr && std::atoi(v) != 0;
     }();
     return on;
+}
+
+// R9-gpu-1 (opt-in): the four-warp staged down (128 threads, 81 blocks). Decided once per process.
+bool gr_down_w4() {
+#if defined(__HIPCC__)
+    return false;   // the 4-warp variant is CUDA-only; HIP keeps the stock staged dispatch
+#else
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_GR_DOWN_WARPS4");
+        return v != nullptr && std::atoi(v) == 1;
+    }();
+    return on;
+#endif
 }
 
 // the split norm with registers (gr_norm_split_fast_kernel): on by default on gfx12; CUDA opt-in (measured on sm_70 only);
@@ -1424,7 +1533,25 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
         // kFusedGrMaxT - the same tile, block size, accumulation order and plain/split/staged path, so the same bits
         // (decided once per device: this runs per layer when decode is not captured)
         const bool max4 = ct <= 4 && gr_down_max4();
-        if (staged) {
+        const bool w4 = gr_down_w4();   // R9-gpu-1: the 4-warp staged dispatch replaces the staged arms below when set
+        if (staged && w4) {
+            const int tg = down_tg(ct);
+            if (exact_t && tg > 0 && tg < ct) {
+                const dim3 grid4(DOWN_BLOCKS4 + 1, (unsigned) (ct / tg));
+                const size_t sm_g = (size_t) tg * per_tok;
+                if (tg == 1) gr_down_staged4_kernel<1, true><<<grid4, 128, sm_g, st>>>(c);
+                else if (tg == 2) gr_down_staged4_kernel<2, true><<<grid4, 128, sm_g, st>>>(c);
+                else gr_down_staged4_kernel<3, true><<<grid4, 128, sm_g, st>>>(c);
+            } else
+            if (exact_t && ct == 1) gr_down_staged4_kernel<1, true><<<DOWN_BLOCKS4 + 1, 128, smem, st>>>(c);
+            else if (exact_t && ct == 2) gr_down_staged4_kernel<2, true><<<DOWN_BLOCKS4 + 1, 128, smem, st>>>(c);
+            else if (exact_t && ct == 3) gr_down_staged4_kernel<3, true><<<DOWN_BLOCKS4 + 1, 128, smem, st>>>(c);
+            else if (exact_t && ct == 4) gr_down_staged4_kernel<4, true><<<DOWN_BLOCKS4 + 1, 128, smem, st>>>(c);
+            else if (exact_t && ct == 5) gr_down_staged4_kernel<5, true><<<DOWN_BLOCKS4 + 1, 128, smem, st>>>(c);
+            else if (exact_t && ct == 6) gr_down_staged4_kernel<6, true><<<DOWN_BLOCKS4 + 1, 128, smem, st>>>(c);
+            else if (max4) gr_down_staged4_kernel<4><<<DOWN_BLOCKS4 + 1, 128, smem, st>>>(c);
+            else gr_down_staged4_kernel<><<<DOWN_BLOCKS4 + 1, 128, smem, st>>>(c);
+        } else if (staged) {
             // #783 PR-g (stuchapin909): a launch of exactly ct <= 6 tokens is its own instantiation, the loop bounds
             // are compile-time (the same sums in the same order); STRATA_NO_MULTI_GR=1 keeps the generic kernels
             const int tg = down_tg(ct);
