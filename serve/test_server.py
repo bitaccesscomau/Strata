@@ -921,6 +921,52 @@ class EffortAtTheEnd(unittest.TestCase):
             with self.assertRaises(ValueError):
                 effort_end_args({"effort_position": "middle"}, str(new), Tok())
 
+    def test_the_history_render_cache_skips_only_the_exact_history_render(self):
+        """#PR (opt-in STRATA_EFFORT_RENDER_CACHE=1): the #458 splice renders the history three
+        times per request; the history render is byte-identical for byte-identical messages,
+        tools and base kwargs, so one exact-match entry can serve the next request."""
+        from serve import server as server_mod
+
+        class Counting:
+            def __init__(self, inner):
+                self.inner, self.calls = inner, []
+            def render(self, messages, **kw):
+                self.calls.append(dict(kw))
+                return self.inner.render(messages, **kw)
+            def __getattr__(self, k):
+                return getattr(self.inner, k)
+
+        counting = Counting(self.svc.template)
+        self.svc.template = counting
+        try:
+            with mock.patch.object(server_mod, "EFFORT_RENDER_CACHE", True):
+                self.svc.effort_history_cache = None
+                self.svc.effort_end = True
+                first = self.svc.render_prompt(self.CHAT, None, {"reasoning_effort": "low"})
+                self.assertEqual(3, len(counting.calls))            # history + full + mine
+                counting.calls.clear()
+                second = self.svc.render_prompt([dict(m) for m in self.CHAT], None, {"reasoning_effort": "low"})
+                self.assertEqual(first, second)
+                self.assertEqual(2, len(counting.calls))            # history came from the cache
+                counting.calls.clear()
+                self.svc.render_prompt(self.CHAT + [self.REPLY], None, {"reasoning_effort": "low"})
+                self.assertEqual(3, len(counting.calls))            # messages changed: re-render
+                counting.calls.clear()
+                self.svc.render_prompt(self.CHAT, None, {"reasoning_effort": "xhigh"})
+                self.assertEqual(1, len(counting.calls))            # default effort: stock single render
+        finally:
+            self.svc.template = counting.inner
+        counting2 = Counting(self.svc.template)
+        self.svc.template = counting2
+        try:
+            with mock.patch.object(server_mod, "EFFORT_RENDER_CACHE", False):
+                self.svc.effort_history_cache = None
+                for _ in range(2):
+                    self.svc.render_prompt(self.CHAT, None, {"reasoning_effort": "low"})
+                self.assertEqual(6, len(counting2.calls))          # env off: stock three renders each
+        finally:
+            self.svc.template = counting2.inner
+
 
 class StatusNeedsTheKey(unittest.TestCase):
     """#212: /status shows the end of the answer being written, so it needs the key like /v1/*."""
