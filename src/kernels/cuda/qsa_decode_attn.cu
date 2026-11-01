@@ -900,10 +900,24 @@ bool pre75_attn() {
 #endif  // ready-made CUDA engine
 }
 // `PRE` picks PR #540's kernel; the environment's choice is STRATA_ATTN_CHUNK.
+// R9-gpu-11 (opt-in, STRATA_ATTN_SCORE4=1, CUDA only, requires the pre75 path and the M == 1 serial
+// decode arm): four score cells per step reuses the shared q slice over four cells instead of two.
+// The V100 measurement said four cost occupancy (registers), so this stays an experiment on sm_86:
+// same score expressions, same cells, same order - a launch-shape change only.
+#if !defined(__HIPCC__)
+static bool attn_score4_on() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_ATTN_SCORE4");
+        return v != nullptr && std::atoi(v) == 1;
+    }();
+    return on;
+}
+#endif
 #if defined(__HIPCC__)
 #define STRATA_ATTN_CHUNK_SEL(M, PRE) ((PRE) ? attn_chunk_kernel_pre75<M, 8, true> : attn_chunk_kernel<M>)
 #else
-#define STRATA_ATTN_CHUNK_SEL(M, PRE) ((PRE) ? attn_chunk_kernel_pre75<M> : attn_chunk_kernel<M>)
+#define STRATA_ATTN_CHUNK_SEL(M, PRE) ((PRE) ? (((M) == 1 && attn_score4_on()) \
+    ? attn_chunk_kernel_pre75<M, 4, false> : attn_chunk_kernel_pre75<M>) : attn_chunk_kernel<M>)
 #endif
 #define STRATA_ATTN_CHUNK(M) STRATA_ATTN_CHUNK_SEL(M, pre75_attn())
 #else
