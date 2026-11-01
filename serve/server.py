@@ -228,6 +228,11 @@ REASONING_WRAP_UP = "\n\nI have thought about this long enough; time to give my 
 # low-effort instruction in place of the xhigh one.  Both off by default.
 HIGH_EFFORT = EFFORT_TEXT["xhigh"]
 LOW_EFFORT = EFFORT_TEXT["low"]
+# PR (opt-in, STRATA_EFFORT_RENDER_CACHE=1): the #458 tail splice renders the message history
+# with the default kwargs; that render is a pure function of (messages, tools, default kwargs),
+# so the last exact key's history string can serve the next request. The key is a 128-bit
+# blake2b over the canonical JSON of each part: byte-identical inputs, byte-identical output.
+EFFORT_RENDER_CACHE = (os.environ.get("STRATA_EFFORT_RENDER_CACHE") or "").strip() == "1"
 LOOP_CHECK_EVERY = 512           # output tokens between two looks at the reasoning (at a clean parser boundary)
 LOOP_COVERAGE = 0.25             # the share of the last 2,000 words inside 12-word passages seen three times
 LOOP_HISTORY_WORDS = 30000       # how far back the passages are counted (bounds the cost of a look)
@@ -4195,6 +4200,7 @@ class Service:
         # #458 (opt-in, the config's "effort_position": "end"): a non-default reasoning effort goes in a short system
         # turn before the answer instead of the top of the prompt, so switching it keeps the cached conversation
         self.effort_end = False
+        self.effort_history_cache = None            # PR: one (key, history) entry, guarded by EFFORT_RENDER_CACHE
         self.conv_log = ConvCacheLog()                  # #596: the parked conversations, from the engine's log
         self.config_path = None                         # #564: the run config the web page's Settings view edits
         self.config_lock = threading.Lock()
@@ -5105,7 +5111,20 @@ class Service:
         if not self.effort_end or (not off and effort in (None, "", "xhigh", "high")):
             return self.template.render(messages, tools=tools, **kwargs)
         base = {k: v for k, v in kwargs.items() if k not in ("reasoning_effort", "enable_thinking")}
-        history = self.template.render(messages, tools=tools, add_generation_prompt=False, **base)
+        cache_key = None
+        if EFFORT_RENDER_CACHE:
+            def _key_of(value):
+                return hashlib.blake2b(json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                                  default=str).encode(), digest_size=16).digest()
+            cache_key = (_key_of(messages), _key_of(tools),
+                         json.dumps(sorted(base.items()), sort_keys=True, ensure_ascii=False, default=str))
+        hit = self.effort_history_cache if EFFORT_RENDER_CACHE and self.effort_history_cache else None
+        if hit is not None and hit[0] == cache_key:
+            history = hit[1]
+        else:
+            history = self.template.render(messages, tools=tools, add_generation_prompt=False, **base)
+            if EFFORT_RENDER_CACHE:
+                self.effort_history_cache = (cache_key, history)
         full = self.template.render(messages, tools=tools, add_generation_prompt=True, **kwargs)
         mine = self.template.render(messages, tools=tools, add_generation_prompt=False, **kwargs)
         if not full.startswith(mine):                  # a template this cannot take apart: rendered as asked
