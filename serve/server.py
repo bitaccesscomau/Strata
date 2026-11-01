@@ -228,6 +228,10 @@ REASONING_WRAP_UP = "\n\nI have thought about this long enough; time to give my 
 # low-effort instruction in place of the xhigh one.  Both off by default.
 HIGH_EFFORT = EFFORT_TEXT["xhigh"]
 LOW_EFFORT = EFFORT_TEXT["low"]
+# R9-ps-4 (host-only micro): the effort-tail splice strips the effort keys from kwargs on every
+# non-default-effort request; a module-level frozenset keeps that rebuild to one comprehension
+# with O(1) membership instead of a fresh tuple comparison per key.
+_EFFORT_KWARGS = frozenset(("reasoning_effort", "enable_thinking"))
 LOOP_CHECK_EVERY = 512           # output tokens between two looks at the reasoning (at a clean parser boundary)
 LOOP_COVERAGE = 0.25             # the share of the last 2,000 words inside 12-word passages seen three times
 LOOP_HISTORY_WORDS = 30000       # how far back the passages are counted (bounds the cost of a look)
@@ -5104,7 +5108,7 @@ class Service:
         off = kwargs.get("enable_thinking") is False
         if not self.effort_end or (not off and effort in (None, "", "xhigh", "high")):
             return self.template.render(messages, tools=tools, **kwargs)
-        base = {k: v for k, v in kwargs.items() if k not in ("reasoning_effort", "enable_thinking")}
+        base = {k: v for k, v in kwargs.items() if k not in _EFFORT_KWARGS}
         history = self.template.render(messages, tools=tools, add_generation_prompt=False, **base)
         full = self.template.render(messages, tools=tools, add_generation_prompt=True, **kwargs)
         mine = self.template.render(messages, tools=tools, add_generation_prompt=False, **kwargs)
