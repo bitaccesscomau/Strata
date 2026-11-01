@@ -17765,6 +17765,40 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
+        // R9-hs-1 (opt-in, STRATA_REFILL_STREAM=1, CUDA): issue the lent-slot refills on a dedicated
+        // non-blocking stream as soon as the last prefill chunk's rows have landed, and gate the
+        // residency publish (res_put) on an event. Decode's first window computes the refilling slots
+        // on the CPU lane because d_res does not name them until the event has fired, so the PCIe
+        // time overlaps the prefill teardown and the decode start instead of sitting in
+        // prefill_batched_ms with a stream-0 drain. The loop after prefill.run stays for every path
+        // where the issue did not happen (no loan, no MTP hook, knob off).
+        static const bool refill_stream = [] {
+            const char* v = std::getenv("STRATA_REFILL_STREAM");
+            return v != nullptr && std::atoi(v) == 1;
+        }();
+        cudaStream_t refill_cs = nullptr;
+        cudaEvent_t refill_ev = nullptr;
+        bool refill_issued = false;
+        Clock::time_point refill_t0{};
+        auto refill_issue = [&]() -> bool {
+            if (refill_cs == nullptr) {
+                if (cudaStreamCreateWithFlags(&refill_cs, cudaStreamNonBlocking) != cudaSuccess) return false;
+                if (cudaEventCreateWithFlags(&refill_ev, cudaEventDisableTiming) != cudaSuccess) return false;
+            }
+            refill_t0 = Clock::now();
+            for (const auto& [i, slot] : lent) {
+                const uint8_t* b = srcp->blob_stable(i / g.n_expert, i % g.n_expert);
+                const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
+                if (b == nullptr) return false;
+                std::string e2;
+                if (!xcache.fill_slot_queued(slot, b, e2, nb, (void*) refill_cs)) return false;
+                srcp->note_async_read(b, nullptr);   // #1237: the source is pinned against release until the copy ends
+                host_res[(size_t) i] = slot;         // host bookkeeping; d_res publishes only after the event
+            }
+            if (cudaEventRecord(refill_ev, refill_cs) != cudaSuccess) return false;
+            refill_issued = true;
+            return true;
+        };
         if (!o.mtp.empty()) {
             if (!mtp.bind(wt, &native_head, nullptr, err)) {
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
@@ -17776,7 +17810,12 @@ int main(int argc, char** argv) {
                 std::vector<int32_t> nxt((size_t) T);
                 for (int64_t t = 0; t < T; ++t) nxt[(size_t) t] = (int32_t) o.tokens[(size_t) (p0 + t + 1)];
                 if (prefill.draft_kv(mtp, R_rows, nxt.data(), T, p0, e)) return true;   // E-9
-                return e.empty() && mtp.prefill(R_rows, nxt.data(), T, p0, e);
+                const bool ok = e.empty() && mtp.prefill(R_rows, nxt.data(), T, p0, e);
+                if (ok && refill_stream && !refill_issued && !lent.empty() && p0 + T >= n_batched && !refill_issue()) {
+                    e = "R9-hs-1: the lent-slot refill issue failed";
+                    return true;
+                }
+                return ok;
             };
         }
 #if defined(STRATA_HAVE_DFLASH2)
@@ -17798,20 +17837,26 @@ int main(int argc, char** argv) {
         }
         // refill the lent slots from the arena and give them back to the decode tier
         if (!lent.empty()) {
-            const Clock::time_point tr = Clock::now();
-            for (const auto& [i, slot] : lent) {   // D-4: queued, one wait (STRATA_REFILL_BLOCKING=1: each)
-                const uint8_t* b = srcp->blob_stable(i / g.n_expert, i % g.n_expert);
-                const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
-                if (b == nullptr || !(refill_blocking() ? xcache.fill_slot_blocking(slot, b, err, nb)
-                                                        : xcache.fill_slot_queued(slot, b, err, nb))) {
-                    std::fprintf(stderr, "strata generate: refilling a lent slot failed: %s\n", err.c_str());
+            const Clock::time_point tr = refill_issued ? refill_t0 : Clock::now();
+            if (!refill_issued) {
+                for (const auto& [i, slot] : lent) {   // D-4: queued, one wait (STRATA_REFILL_BLOCKING=1: each)
+                    const uint8_t* b = srcp->blob_stable(i / g.n_expert, i % g.n_expert);
+                    const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
+                    if (b == nullptr || !(refill_blocking() ? xcache.fill_slot_blocking(slot, b, err, nb)
+                                                            : xcache.fill_slot_queued(slot, b, err, nb))) {
+                        std::fprintf(stderr, "strata generate: refilling a lent slot failed: %s\n", err.c_str());
+                        return 1;
+                    }
+                    if (!refill_blocking()) srcp->note_async_read(b, nullptr);   // #1237
+                    host_res[(size_t) i] = slot;
+                }
+                if (!xcache.sync_queued(err)) {
+                    std::fprintf(stderr, "strata generate: refilling the lent slots failed: %s\n", err.c_str());
                     return 1;
                 }
-                if (!refill_blocking()) srcp->note_async_read(b, nullptr);   // #1237
-                host_res[(size_t) i] = slot;
-            }
-            if (!xcache.sync_queued(err)) {
-                std::fprintf(stderr, "strata generate: refilling the lent slots failed: %s\n", err.c_str());
+            } else if (cudaEventSynchronize(refill_ev) != cudaSuccess) {
+                err = "R9-hs-1: waiting for the refill stream's event failed";
+                std::fprintf(stderr, "strata generate: %s\n", err.c_str());
                 return 1;
             }
 #if defined(_WIN32)
@@ -17819,8 +17864,9 @@ int main(int argc, char** argv) {
                 srcp->release(i / g.n_expert, i % g.n_expert);
 #endif
             res_put(d_res);
-            std::fprintf(stderr, "strata generate: %zu lent slots refilled in %.1f ms\n", lent.size(),
-                         std::chrono::duration<double, std::milli>(Clock::now() - tr).count());
+            std::fprintf(stderr, "strata generate: %zu lent slots refilled in %.1f ms%s\n", lent.size(),
+                         std::chrono::duration<double, std::milli>(Clock::now() - tr).count(),
+                         refill_issued ? " (R9-hs-1 stream)" : "");
         }
 #if defined(STRATA_HAVE_DFLASH2)
         prefill.clear_taps();

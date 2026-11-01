@@ -206,6 +206,10 @@ public:
     /// perf-review D-4: `fill_slot_blocking`'s copy on the same (legacy) stream, but queued: many slots are refilled
     /// with one `sync_queued` at the end instead of a wait per slot. Same ordering against earlier work, same bytes.
     bool fill_slot_queued(int32_t slot, const uint8_t* host_blob, std::string& err, int64_t bytes = 0);
+    /// R9-hs-1 (STRATA_REFILL_STREAM): the same queued fill issued on the caller's stream (a dedicated
+    /// non-blocking refill stream), so the DMA overlaps the default stream's work; gate the slot's first
+    /// use on an event recorded on that stream. `stream` is a `cudaStream_t` passed as `void*`.
+    bool fill_slot_queued(int32_t slot, const uint8_t* host_blob, std::string& err, int64_t bytes, void* stream);
     /// `fill_slot_queued` for a blob that is not in one piece: each `parts[i].n` bytes at `parts[i].p` go to byte `parts[i].at`
     /// of the slot (the pieces tile the blob).  Same queue, same `sync_queued`.
     bool fill_slot_queued_parts(int32_t slot, const BlobPart* parts, int n, std::string& err);
