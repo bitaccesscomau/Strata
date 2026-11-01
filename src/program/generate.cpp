@@ -17758,6 +17758,21 @@ int main(int argc, char** argv) {
         }
         if (borrow == nullptr)
             std::fprintf(stderr, "strata generate: prompt path allocates its own buffers (no cache slots to borrow)\n");
+        if (!kvg_started) {
+            // R9-ps-1 (opt-in, STRATA_KV_GROW_EARLY=1): grow the elastic K/V before prefill.init and the
+            // drafter/tap host setup, so the growth's full-device quiesce lands when the device is known
+            // idle and its slot moves overlap no launch. kvg_ensure and kvg_start are self-guarding when
+            // the elastic K/V is off, and the late block below stays as the fallback for every path.
+            static const bool early = [] {
+                const char* v = std::getenv("STRATA_KV_GROW_EARLY");
+                return v != nullptr && std::atoi(v) == 1;
+            }();
+            if (early) {
+                kvg_started = true;
+                kvg_start(xcache.slots());
+                if (!kvg_ensure(n_prompt + o.max_new + 64, [] { cudaDeviceSynchronize(); })) return 1;
+            }
+        }
         if (!multi_gpu && !o.no_pool) prefill.set_cpu_pool(&pool);
         if (!prefill.init(wt, g, ss, srcp, o.expert_cache > 0 ? &xcache : nullptr,
                           host_res.empty() ? nullptr : host_res.data(), o.prefill_chunk, main_cs, err, borrow,
