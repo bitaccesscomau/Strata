@@ -206,6 +206,17 @@ public:
     /// perf-review D-4: `fill_slot_blocking`'s copy on the same (legacy) stream, but queued: many slots are refilled
     /// with one `sync_queued` at the end instead of a wait per slot. Same ordering against earlier work, same bytes.
     bool fill_slot_queued(int32_t slot, const uint8_t* host_blob, std::string& err, int64_t bytes = 0);
+    /// R9-hs-3 (opt-in, STRATA_REFILL_RING=1): the blocking refill routed through a pinned double
+    /// buffer. The host memcpy lands in pinned staging (no driver re-paging of the mmap source),
+    /// one async H2D on the legacy stream carries it, and a parity buffer is reused only after the
+    /// event recorded after its copy has fired. Completion-before-use is preserved for stream-0
+    /// consumers by stream order; the host returns without the blocking pageable stall. HIP keeps
+    /// the plain blocking path.
+    bool fill_slot_ring(int32_t slot, const uint8_t* host_blob, std::string& err, int64_t bytes = 0);
+    /// R9-hs-3: clear the ring's in-flight copy (the event recorded after the last async fill).
+    /// Consumers that read the slot from a stream other than the legacy stream call this first;
+    /// the legacy-stream consumers are protected by stream order and need no drain.
+    bool ring_drain(std::string& err);
     /// `fill_slot_queued` for a blob that is not in one piece: each `parts[i].n` bytes at `parts[i].p` go to byte `parts[i].at`
     /// of the slot (the pieces tile the blob).  Same queue, same `sync_queued`.
     bool fill_slot_queued_parts(int32_t slot, const BlobPart* parts, int n, std::string& err);
@@ -270,6 +281,10 @@ private:
     int64_t blob_ = 0;
     int64_t next_free_ = 0;
     int64_t fills_ = 0;
+    void* ring_stage_ = nullptr;      ///< R9-hs-3: pinned double staging, 2 x blob_ (the ring)
+    void* ring_ev_ = nullptr;         ///< R9-hs-3: cudaEvent_t recorded after each ring copy
+    bool ring_pending_ = false;       ///< R9-hs-3: a ring copy has not been cleared yet
+    int ring_parity_ = 0;             ///< R9-hs-3: the staging buffer for the next ring fill
     /// R4.2g.  `per_layer_` off (the default) leaves `next_free_` as the only admission counter, so the
     /// pre-existing path is untouched.
     bool per_layer_ = false;
