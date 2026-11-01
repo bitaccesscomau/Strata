@@ -385,8 +385,20 @@ void doorbell_publish(const float* x, const int32_t* ids, const float* weights, 
 void doorbell_publish_res(const float* x, const int32_t* ids, const int32_t* d_res, int n_expert, int64_t n, int64_t k,
                           float* x_out, int32_t* ids_out, uint32_t* d_seq, void* stream) {
     if (k > 1024) { std::fprintf(stderr, "doorbell_publish_res: k too large\n"); std::exit(1); }
-    doorbell_publish_res_kernel<<<1, 1024, 0, (cudaStream_t) stream>>>(x, ids, d_res, n_expert, (int) n, (int) k,
-                                                                        x_out, ids_out, d_seq);
+    // R9-gpu-7 (opt-in, STRATA_DOORBELL_RES_256=1, CUDA only): the captured decode call has at most eight
+    // rows and 80 IDs, so 256 threads cover the ID publication and stride the x copy; less CTA setup and
+    // barrier participation than the hard-coded 1024. The kernel is blockDim-generic (guarded `threadIdx < k`
+    // ID arm, strided copy loop), so the smaller launch is the same computation with fewer participants.
+    int nt = 1024;
+#if !defined(__HIPCC__)
+    static const bool small = [] {
+        const char* v = std::getenv("STRATA_DOORBELL_RES_256");
+        return v != nullptr && std::atoi(v) == 1;
+    }();
+    if (small && n <= 8 * 2560 && k <= 80) nt = 256;
+#endif
+    doorbell_publish_res_kernel<<<1, nt, 0, (cudaStream_t) stream>>>(x, ids, d_res, n_expert, (int) n, (int) k,
+                                                                      x_out, ids_out, d_seq);
     check_launch("doorbell_publish_res");
 }
 
