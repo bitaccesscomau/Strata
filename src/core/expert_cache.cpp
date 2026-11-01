@@ -690,6 +690,12 @@ void ExpertCache::close() {
     blocking_staging_ = nullptr;
     blocking_staging_bytes_ = 0;
 #endif
+    if (ring_stage_) (void) cudaFreeHost(ring_stage_);   // R9-hs-3
+    ring_stage_ = nullptr;
+    if (ring_ev_ != nullptr) (void) cudaEventDestroy((cudaEvent_t) ring_ev_);
+    ring_ev_ = nullptr;
+    ring_pending_ = false;
+    ring_parity_ = 0;
     off_.clear();
     guard_ = 0;
     if (!segs_.empty()) {
@@ -815,6 +821,67 @@ bool ExpertCache::fill_slot_blocking(int32_t slot, const uint8_t* host_blob, std
         return false;
     }
     ++fills_;
+    return true;
+}
+
+bool ExpertCache::fill_slot_ring(int32_t slot, const uint8_t* host_blob, std::string& err, int64_t bytes) {
+    if (sealed_) sealed_write("fill_slot_ring", slot);
+    const size_t n = (size_t) (bytes > 0 && bytes <= blob_ ? bytes : blob_);
+    uint8_t* dst = device_slot(slot);
+    if (dst == nullptr) {
+        err = "ExpertCache::fill_slot_ring: slot outside the arena";
+        return false;
+    }
+    if (host_blob == nullptr) {
+        err = "ExpertCache::fill_slot_ring: the host blob is null";
+        return false;
+    }
+#if defined(STRATA_USE_HIP)
+    return fill_slot_blocking(slot, host_blob, err, bytes);   // the ring is CUDA's pageable-staging fix
+#else
+    if (ring_stage_ == nullptr) {
+        if (cudaMallocHost(&ring_stage_, 2 * (size_t) blob_) != cudaSuccess) {
+            ring_stage_ = nullptr;
+            err = "ExpertCache::fill_slot_ring: the pinned staging allocation failed";
+            return false;
+        }
+        if (cudaEventCreateWithFlags((cudaEvent_t*) &ring_ev_, cudaEventDisableTiming) != cudaSuccess) {
+            ring_ev_ = nullptr;
+            err = "ExpertCache::fill_slot_ring: the event creation failed";
+            return false;
+        }
+    }
+    // The parity buffer was last used two slots ago; clearing that copy is what makes reuse safe.
+    if (ring_pending_ && cudaEventSynchronize((cudaEvent_t) ring_ev_) != cudaSuccess) {
+        err = "ExpertCache::fill_slot_ring: the event wait failed";
+        return false;
+    }
+    ring_pending_ = false;
+    uint8_t* stage = (uint8_t*) ring_stage_ + (size_t) ring_parity_ * (size_t) blob_;
+    std::memcpy(stage, host_blob, n);
+    const cudaError_t e = cudaMemcpyAsync(dst, stage, n, cudaMemcpyHostToDevice, (cudaStream_t) 0);
+    if (e != cudaSuccess) {
+        err = std::string("ExpertCache::fill_slot_ring: ") + cudaGetErrorString(e);
+        return false;
+    }
+    if (cudaEventRecord((cudaEvent_t) ring_ev_, (cudaStream_t) 0) != cudaSuccess) {
+        err = "ExpertCache::fill_slot_ring: the event record failed";
+        return false;
+    }
+    ring_pending_ = true;
+    ring_parity_ ^= 1;
+    ++fills_;
+    return true;
+#endif
+}
+
+bool ExpertCache::ring_drain(std::string& err) {
+    if (!ring_pending_) return true;
+    if (ring_ev_ != nullptr && cudaEventSynchronize((cudaEvent_t) ring_ev_) != cudaSuccess) {
+        err = "ExpertCache::ring_drain: the event wait failed";
+        return false;
+    }
+    ring_pending_ = false;
     return true;
 }
 

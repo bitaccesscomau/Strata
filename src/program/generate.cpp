@@ -456,6 +456,15 @@ bool refill_blocking() {
     return v;
 }
 
+// R9-hs-3 (opt-in, STRATA_REFILL_RING=1, meaningful beside STRATA_REFILL_BLOCKING=1): route the blocking
+// refills through ExpertCache::fill_slot_ring (pinned double staging, async on the legacy stream).
+// Every site that picks the blocking path below is followed by a legacy-stream sync (res_put, sync_queued
+// or verify_slot's read-back), which is the ring's drain point; the slots' consumers are gated behind those.
+bool refill_ring() {
+    static const bool v = std::getenv("STRATA_REFILL_RING") != nullptr;
+    return v;
+}
+
 using Clock = std::chrono::steady_clock;
 
 // --pipeline-windows: every STRATA_PIPELINE_* test and tuning variable (THETA, FORCE_MISS, SWITCH, LOG, TRACE, DOOM_SKIP,
@@ -7328,8 +7337,10 @@ int main(int argc, char** argv) {
             const uint8_t* b = srcp->blob_stable(profile[(size_t) i].first, profile[(size_t) i].second);
             const bool nib_pair = nib_x.active() && nib::layer(profile[(size_t) i].first).on;   // STRATA_EXPERT_NIBBLE
             if (b == nullptr || !(nib_pair ? nib_x.add(profile[(size_t) i].first, profile[(size_t) i].second, slot, b, err)
-                                           : xcache.fill_slot_blocking(slot, b, err,
-                    (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(profile[(size_t) i].first)))) {
+                                           : (refill_ring() ? xcache.fill_slot_ring(slot, b, err,
+                       (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(profile[(size_t) i].first))
+                       : xcache.fill_slot_blocking(slot, b, err,
+                       (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(profile[(size_t) i].first))))) {
                 std::fprintf(stderr, "strata generate: the profile fill failed at pair %lld: %s\n",
                              (long long) i, err.c_str());
                 return 1;
@@ -7471,7 +7482,8 @@ int main(int argc, char** argv) {
             const uint8_t* b = srcp->blob_stable(pr.first, pr.second);
             const bool nib_pair = nib_c.active() && nib::layer(pr.first).on;   // STRATA_EXPERT_NIBBLE
             if (b == nullptr || !(nib_pair ? nib_c.add(pr.first, pr.second, slot, b, err)
-                                           : st.cache.fill_slot_blocking(slot, b, err, (int64_t) lay.blob_bytes(pr.first)))) {
+                                           : (refill_ring() ? st.cache.fill_slot_ring(slot, b, err, (int64_t) lay.blob_bytes(pr.first))
+                                                            : st.cache.fill_slot_blocking(slot, b, err, (int64_t) lay.blob_bytes(pr.first))))) {
                 std::fprintf(stderr, "strata generate: layer split, CUDA%d profile fill failed at pair %lld: %s\n",
                              st.dev, (long long) filled, err.c_str());
                 return 1;
@@ -14973,7 +14985,8 @@ int main(int argc, char** argv) {
                     }
                     const uint8_t* b = srcp->blob_stable(i / g.n_expert, i % g.n_expert);
                     const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
-                    if (b == nullptr || !(refill_blocking() ? p.cache->fill_slot_blocking(slot, b, e, nb)
+                    if (b == nullptr || !(refill_blocking() ? (refill_ring() ? p.cache->fill_slot_ring(slot, b, e, nb)
+                                                                            : p.cache->fill_slot_blocking(slot, b, e, nb))
                                                             : p.cache->fill_slot_queued(slot, b, e, nb)))
                         return false;
                     if (!refill_blocking()) srcp->note_async_read(b, nullptr);   // #1237
@@ -17802,7 +17815,8 @@ int main(int argc, char** argv) {
             for (const auto& [i, slot] : lent) {   // D-4: queued, one wait (STRATA_REFILL_BLOCKING=1: each)
                 const uint8_t* b = srcp->blob_stable(i / g.n_expert, i % g.n_expert);
                 const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
-                if (b == nullptr || !(refill_blocking() ? xcache.fill_slot_blocking(slot, b, err, nb)
+                if (b == nullptr || !(refill_blocking() ? (refill_ring() ? xcache.fill_slot_ring(slot, b, err, nb)
+                                                                        : xcache.fill_slot_blocking(slot, b, err, nb))
                                                         : xcache.fill_slot_queued(slot, b, err, nb))) {
                     std::fprintf(stderr, "strata generate: refilling a lent slot failed: %s\n", err.c_str());
                     return 1;
