@@ -281,6 +281,16 @@ inline float g_route_prior() {
     return lambda;
 }
 inline bool g_qfuse() { static const bool on = [] { const char* v = std::getenv("STRATA_QFUSE"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
+// R9-gpu-2 (opt-in, STRATA_ROUTE_PUBLISH_FUSED=1, CUDA only): top-10 and the residency-aware doorbell
+// as one CTA on the 2..8-row native decode lane (see native_router.cu for the kernel).
+inline bool g_route_publish_fused() {
+#if defined(__HIPCC__)
+    return false;   // the fused kernel publishes over the CUDA mapped ring path
+#else
+    static const bool on = [] { const char* v = std::getenv("STRATA_ROUTE_PUBLISH_FUSED"); return v != nullptr && std::atoi(v) == 1; }();
+    return on;
+#endif
+}
 #define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
 
 struct Bump {
@@ -2060,7 +2070,16 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         // move into the combine, gate + up share one launch (all bitwise; resident combine path, 2-8 rows only)
         const WeightRef* w_sgi = lfuse_on(n) && g_lfuse_gate() ? v.get("ffn_gate_inp_shexp.weight") : nullptr;
         bool sg_ready = false;
+        // R9-gpu-2 (opt-in, STRATA_ROUTE_PUBLISH_FUSED=1, CUDA): when the pair below would be exactly
+        // top-10 multi plus doorbell_publish_res (no prior rewrite, no resident plan, no always/remote
+        // publish, no marginal stats), one CTA does both. Every condition here is checked before
+        // anything is launched, and the publish wrapper checks its shape too, falling back to the
+        // stock pair when it declines.
+        bool fused_route = false;
         if (dec_batch && n > 1 && w_router != nullptr && native_router_enabled() && NE == 512 && K == 10) {
+            fused_route = g_route_publish_fused() && n <= 8 && !ar_on() && !device_plan_ &&
+                          !(remote_opt_ || always_publish_) && g_route_prior() == 0.0f &&
+                          route_resident_cfg().margin == 0.0f && !rs_on_;
             try {
                 if (w_sgi != nullptr)
                     sg_ready = bf16_gemv_fp32_mmvf_multi_aux(mixed_ + tb * N, N, (const uint16_t*) w_router->data,
@@ -2069,6 +2088,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 if (!sg_ready)
                 bf16_gemv_fp32_mmvf_multi(mixed_ + tb * N, N, (const uint16_t*) w_router->data, logits_ + tb * NE, NE, N,
                                           NE, n, cs);
+                if (!fused_route)
                 native_router_top10_multi(logits_ + tb * NE, ids_ + tb * K, w_ + tb * K, n, cs);
             } catch (const std::exception& e) { err = "verify router: " + std::string(e.what()); return false; }
 #if defined(STRATA_HIP_GFX906)
@@ -2121,10 +2141,20 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
 #endif
             // #578: the helper GPUs reduce with the routing weights - publish them; set_always_publish: the rows
             // whatever the device's residency table says (pipelined windows)
+            bool fused_published = false;
+            if (fused_route) {
+                const int32_t* f_res = hits_.d_res != nullptr ? (hits_.d_res + l * g.n_expert) : nullptr;
+                fused_published = native_router_top10_publish(logits_ + tb * NE, ids_ + tb * K, w_ + tb * K,
+                                                              xm, f_res, (int) g.n_expert, (int64_t) n * N,
+                                                              (int64_t) n * K, m_x_ + tb * N, m_ids_ + tb * K,
+                                                              (void*) m_seq_, n, cs);
+                if (!fused_published)
+                    native_router_top10_multi(logits_ + tb * NE, ids_ + tb * K, w_ + tb * K, n, cs);
+            }
             if (remote_opt_ || always_publish_)
                 doorbell_publish(xm, ids_ + tb * K, w_ + tb * K, (int64_t) n * N, (int64_t) n * K, m_x_ + tb * N,
                                  m_ids_ + tb * K, m_w_ + tb * K, m_seq_, cs);
-            else {
+            else if (!fused_published) {
                 const int32_t* layer_res = hits_.d_res != nullptr ? (hits_.d_res + l * g.n_expert) : nullptr;
                 doorbell_publish_res(xm, ids_ + tb * K, layer_res, (int) g.n_expert, (int64_t) n * N, (int64_t) n * K,
                                      m_x_ + tb * N, m_ids_ + tb * K, m_seq_, cs);

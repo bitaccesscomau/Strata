@@ -233,6 +233,110 @@ void native_router_top10_multi(const float* logits, int32_t* ids, float* weights
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
+
+// R9-gpu-2 (opt-in, STRATA_ROUTE_PUBLISH_FUSED=1, CUDA): top-10 and the residency-aware doorbell in one
+// CTA. Each token warp runs the route_multi body verbatim (same bits, same tie rule), publishes its ten
+// ids straight out of registers, and every CTA thread then joins the residency reduction, the x copy
+// when any id misses, the system fence and the sequence update - one launch per layer-group instead of
+// two, and the doorbell lands as soon as the last id exists. Inactive token warps take part in the
+// barriers (the audit's active-predicate requirement). The host ring protocol is unchanged.
+__launch_bounds__(256, 1)
+__global__ void route_multi_publish(const float* __restrict__ logits, int32_t* __restrict__ ids,
+                                    float* __restrict__ weights, const float* __restrict__ x,
+                                    const int32_t* __restrict__ d_res, int n_expert, int n, int k,
+                                    float* __restrict__ x_out, int32_t* __restrict__ ids_out, uint32_t* seq,
+                                    int n_tok) {
+    __shared__ int s_miss[8];
+    const int tk = (int) threadIdx.y;
+    const int lane = threadIdx.x;
+    int miss = 0;
+    if (tk < n_tok) {
+        logits += (size_t) tk * 512; ids += (size_t) tk * 10; weights += (size_t) tk * 10;
+        float values[16];
+#pragma unroll
+        for (int i = 0; i < 16; ++i) values[i] = logits[lane + i * 32];
+        __syncwarp();
+        float maximum = -INFINITY;
+#pragma unroll
+        for (int i = 0; i < 16; ++i) maximum = max(maximum, values[i]);
+        maximum = warp_max(maximum);
+        float sum = 0.0f;
+#pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            values[i] = expf(values[i] - maximum);
+            sum += values[i];
+        }
+        const float reciprocal = 1.0f / warp_sum(sum);
+#pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            values[i] *= reciprocal;
+            if (__isnanf(values[i])) values[i] = -FLT_MAX;
+        }
+        float selected = 0.0f, selected_sum = 0.0f;
+        for (int rank = 0; rank < 10; ++rank) {
+            float best = values[0];
+            int expert = lane;
+#pragma unroll
+            for (int i = 1; i < 16; ++i) {
+                if (values[i] > best) { best = values[i]; expert = lane + i * 32; }
+            }
+#pragma unroll
+            for (int mask = 16; mask; mask >>= 1) {
+                const float other = __shfl_xor_sync(0xffffffffu, best, mask, 32);
+                const int other_id = __shfl_xor_sync(0xffffffffu, expert, mask, 32);
+                if (other > best || (other == best && other_id < expert)) { best = other; expert = other_id; }
+            }
+            if ((expert & 31) == lane) {
+                values[expert / 32] = -INFINITY;
+                ids[rank] = expert;
+                selected_sum += best;
+            }
+            if (rank == lane) selected = best;
+        }
+        selected_sum = max(warp_sum(selected_sum), 6.103515625e-5f);
+        const float inverse_selected_sum = 1.0f / selected_sum;
+        if (lane < 10) weights[lane] = selected * inverse_selected_sum;
+        int m = 0;
+        if (lane < 10) {
+            const int32_t id = ids[lane];
+            ids_out[(size_t) tk * 10 + lane] = id;
+            m = (d_res == nullptr || id < 0 || id >= n_expert || d_res[id] < 0);
+        }
+        miss = __reduce_or_sync(0xffffffffu, m);
+    }
+    if (threadIdx.x == 0) s_miss[tk] = miss;
+    __syncthreads();                                   // every published id is visible to the copy decision
+    int any = s_miss[0] | s_miss[1] | s_miss[2] | s_miss[3] | s_miss[4] | s_miss[5] | s_miss[6] | s_miss[7];
+    if (__syncthreads_or(any)) {
+        for (int i = threadIdx.x; i < n; i += 256) x_out[i] = x[i];
+        __threadfence_system();
+    } else {
+        __threadfence_system();                        // the doorbell_publish_res_kernel's all-hit fence
+    }
+    (void) k;
+    __syncthreads();
+    if (threadIdx.x == 0 && threadIdx.y == 0) {
+        *(volatile uint32_t*) seq = *(volatile uint32_t*) seq + 1u;
+    }
+}
+
+// True when the fused launch ran; false (nothing launched, no side effects) when the shape is out of
+// scope, so the caller keeps the stock top-10 + doorbell_publish_res pair.
+bool native_router_top10_publish(const float* logits, int32_t* ids, float* weights, const float* x,
+                                 const int32_t* d_res, int n_expert, int64_t n, int64_t k, float* x_out,
+                                 int32_t* ids_out, void* seq, int n_tok, void* stream) {
+    if (n_tok < 1 || n_tok > 8) return false;
+    if (n != (int64_t) n_tok * 512 || k != (int64_t) n_tok * 10) return false;
+    if (!stream || !valid(logits, (size_t) n_tok * 512 * 4) || !valid(ids, (size_t) n_tok * 10 * 4) ||
+        !valid(weights, (size_t) n_tok * 10 * 4))
+        return false;
+    route_multi_publish<<<1, dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(
+        logits, ids, weights, x, d_res, n_expert, (int) n, (int) k, x_out, ids_out,
+        (uint32_t*) seq, n_tok);
+    const auto error = cudaGetLastError();
+    if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+    return true;
+}
 bool native_router_topk_supported(int n_expert, int k) { return (n_expert == 512 && k == 10) || (n_expert == 256 && k == 8); }
 void native_router_topk(const float* logits, int32_t* ids, float* weights, int n_expert, int k, int n_tok, void* stream) {
     if (n_expert == 512 && k == 10) {   // Flash-Next: the pinned kernels above, unchanged
