@@ -849,6 +849,24 @@ bool ExpertCache::fill_slot_queued_parts(int32_t slot, const BlobPart* parts, in
         err = "ExpertCache::fill_slot_queued_parts: the pieces are larger than a slot";
         return false;
     }
+    // R9-hs-2 (opt-in, STRATA_REFILL_COALESCE=1): when the parts fill a gapless destination run
+    // starting at the slot's first byte and their host sources are contiguous, one copy moves the
+    // whole run: each pageable H2D call costs driver staging, so fewer calls means fewer staging
+    // handoffs. Every other part map keeps the per-part loop.
+    static const bool coalesce = [] {
+        const char* v = std::getenv("STRATA_REFILL_COALESCE");
+        return v != nullptr && std::atoi(v) == 1;
+    }();
+    if (coalesce && parts_run_contiguous(parts, n)) {
+        const cudaError_t e0 = cudaMemcpyAsync(dst, parts[0].p, (size_t) total, cudaMemcpyHostToDevice,
+                                                (cudaStream_t) 0);
+        if (e0 != cudaSuccess) {
+            err = std::string("ExpertCache::fill_slot_queued_parts: ") + cudaGetErrorString(e0);
+            return false;
+        }
+        ++fills_;
+        return true;
+    }
     for (int i = 0; i < n; ++i) {
         const cudaError_t e = cudaMemcpyAsync(dst + parts[i].at, parts[i].p, (size_t) parts[i].n, cudaMemcpyHostToDevice,
                                               (cudaStream_t) 0);
