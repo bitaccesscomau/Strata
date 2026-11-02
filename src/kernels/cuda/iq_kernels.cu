@@ -2925,6 +2925,83 @@ __global__ void __launch_bounds__(512) native_gu_swiglu_kernel(const unsigned lo
     }
 }
 
+// R9-gpu-3 (opt-in, STRATA_GU_SWIGLU_256=1, CUDA): native_gu_swiglu_kernel's tile with 256 threads. The block still
+// owns 32 consecutive hidden columns; its 16 sub-warps each compute columns sw and sw + 16 in turn (serially, so the
+// live registers are one column's), with the same row_dot2_80_sub16 calls, the same NVFP4 tail scales and the same
+// rounded SwiGLU product. All 32 shared values are written before any q8_1 store (a half block is never quantised on
+// its own), and warp k (8 warps, GRP_NC = 4 entries) stores entry k exactly as the 512-thread kernel does.
+template<int TG, bool STAGE_GRID>
+__global__ void __launch_bounds__(256) native_gu_swiglu256_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                                  const int32_t* __restrict__ grp_start,
+                                                                  const int32_t* __restrict__ n_groups,
+                                                                  const int32_t* __restrict__ ent_tok,
+                                                                  const block_q8_1* __restrict__ xq, NativeExpertLayout L,
+                                                                  block_q8_1* __restrict__ hq) {
+#if defined(__HIPCC__)
+#pragma clang fp contract(off)
+#endif
+    const int ng = *n_groups;
+    if ((int) blockIdx.y >= ng) return;
+    STRATA_SHARED_ALIGN16_U32(s_grid_buf, IqGridWords<TG, STAGE_GRID>::value);
+    const uint32_t* s_grid = stage_iq_grid<TG, STAGE_GRID>(s_grid_buf, threadIdx.x, 256);
+    __shared__ float sh[GRP_NC][32];
+    const int sw = threadIdx.x >> 4, t = threadIdx.x & 15, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    for (int g = blockIdx.y; g < ng; g += gridDim.y) {
+        const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+        const float sg = L.tail_off ? ((const float*) (blob + L.tail_off))[0] : 1.0f;   // NVFP4: s_gate / s_up
+        const float su = L.tail_off ? ((const float*) (blob + L.tail_off))[1] : 1.0f;
+        const int e0 = grp_start[g], e1 = grp_start[g + 1];
+        for (int e = e0; e < e1; e += GRP_NC) {
+            const int n = min(GRP_NC, e1 - e);
+#pragma unroll 1
+            for (int half = 0; half < 2; ++half) {
+                const int col = sw + 16 * half;                       // the block's hidden column 0..31
+                const int r = blockIdx.x * 32 + col;
+                const size_t g_off = (size_t) r * L.gu_row, u_off = L.up_off + (size_t) r * L.gu_row;
+                float gv[GRP_NC], uv[GRP_NC];
+                if (n == 1) {
+                    const int off1[1] = { ent_tok[e] * 80 };
+                    float a1[1], b1[1];
+                    row_dot2_80_sub16<TG, 1, true, STAGE_GRID>(blob + g_off, blob + u_off, xq, off1, 1, t, a1, b1, s_grid);
+                    gv[0] = a1[0]; uv[0] = b1[0];
+                } else if (n == 2) {
+                    const int off2[2] = { ent_tok[e] * 80, ent_tok[e + 1] * 80 };
+                    float a2[2], b2[2];
+                    row_dot2_80_sub16<TG, 2, true, STAGE_GRID>(blob + g_off, blob + u_off, xq, off2, 2, t, a2, b2, s_grid);
+#pragma unroll
+                    for (int c = 0; c < 2; ++c) { gv[c] = a2[c]; uv[c] = b2[c]; }
+                } else if (n == 3) {
+                    const int off3[3] = { ent_tok[e] * 80, ent_tok[e + 1] * 80, ent_tok[e + 2] * 80 };
+                    float a3[3], b3[3];
+                    row_dot2_80_sub16<TG, 3, true, STAGE_GRID>(blob + g_off, blob + u_off, xq, off3, 3, t, a3, b3, s_grid);
+#pragma unroll
+                    for (int c = 0; c < 3; ++c) { gv[c] = a3[c]; uv[c] = b3[c]; }
+                } else {
+                    const int off4[4] = { ent_tok[e] * 80, ent_tok[e + 1] * 80, ent_tok[e + 2] * 80, ent_tok[e + 3] * 80 };
+                    float a4[4], b4[4];
+                    row_dot2_80_sub16<TG, 4, true, STAGE_GRID>(blob + g_off, blob + u_off, xq, off4, 4, t, a4, b4, s_grid);
+#pragma unroll
+                    for (int c = 0; c < 4; ++c) { gv[c] = a4[c]; uv[c] = b4[c]; }
+                }
+#pragma unroll
+                for (int c = 0; c < GRP_NC; ++c) {
+                    if (c < n && t == c) {
+                        const float gg = gv[c] * sg, uu = uv[c] * su;
+#if defined(__HIPCC__)
+                        sh[c][col] = (gg / (1.0f + __expf(-gg))) * uu;
+#else
+                        sh[c][col] = __fmul_rn(gg / (1.0f + __expf(-gg)), uu);
+#endif
+                    }
+                }
+            }
+            __syncthreads();                                          // all 32 columns of every entry are in sh
+            if (warp < n) q8_1_store(sh[warp][lane], hq, (long long) (e + warp) * L.n_ff + (long long) blockIdx.x * 32 + lane);
+            __syncthreads();
+        }
+    }
+}
+
 // ---------------------------------------------------------------- dequant (dequantize.cuh)
 template<typename dst_t> __device__ __forceinline__ dst_t cvt(float v);
 template<> __device__ __forceinline__ float cvt<float>(float v) { return v; }
@@ -4263,6 +4340,20 @@ bool launch_gu_swiglu(const NativeExpertLayout& L, int64_t gy, cudaStream_t s, c
         const dim3 grid((unsigned) (L.n_ff / 32), (unsigned) gy);
         bool stage = false;
         if constexpr (kStageIqGrid<TG>) stage = g_stage_grid && !((TG == 18 || TG == 21) && !stage_tables_on()) && !(kTqType<TG> && !tq_stage_on());
+#if !defined(__HIPCC__)
+        // R9-gpu-3 (opt-in): the 256-thread tile; the same eligibility as the 512-thread kernel (checked above),
+        // trellis types excluded (their codebook staging was sized for 512 threads)
+        static const bool gu256 = [] { const char* v = std::getenv("STRATA_GU_SWIGLU_256"); return v != nullptr && std::atoi(v) == 1; }();
+        if (gu256 && !kTqType<TG>) {
+            if constexpr (kStageIqGrid<TG>) {
+                if (stage) native_gu_swiglu256_kernel<TG, true><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq);
+                else native_gu_swiglu256_kernel<TG, false><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq);
+            } else {
+                native_gu_swiglu256_kernel<TG, false><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq);
+            }
+            return true;
+        }
+#endif
         if constexpr (kStageIqGrid<TG>) {
             if (stage) native_gu_swiglu_kernel<TG, true><<<grid, 512, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq);
             else native_gu_swiglu_kernel<TG, false><<<grid, 512, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq);
