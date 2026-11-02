@@ -281,6 +281,8 @@ inline float g_route_prior() {
     return lambda;
 }
 inline bool g_qfuse() { static const bool on = [] { const char* v = std::getenv("STRATA_QFUSE"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
+// R9-gpu-8 (opt-in): QSA K and V projections through native_mmvq_pair where it is bitwise the two calls.
+inline bool g_qsa_kv_pair() { static const bool on = [] { const char* v = std::getenv("STRATA_QSA_KV_PAIR"); return v != nullptr && std::atoi(v) == 1; }(); return on; }
 #define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
 
 struct Bump {
@@ -1845,8 +1847,30 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 }
                 if (!sidem) idx_key(cs);
                 stamp(l, 7, grp);
+                // R9-gpu-8 (opt-in, STRATA_QSA_KV_PAIR=1): K and V in one launch where native_mmvq_pair is bitwise
+                // the two stock calls: both Q8_0, same shape, and the stock mm would take plain native_mmvq for
+                // both (IL off or unsupported for this shape). Anything else keeps the two stock calls. One line
+                // at the first decision says which way it went, so an arm can prove the path ran.
+                bool kv_paired = false;
+                if (g_qsa_kv_pair()) {
+                    const int kv_out = (int) (NKV * HD);
+                    const bool plain = !(g_mmvq_il() && strata::kernels::native_mmvq_il_supported(8, n, kv_out));
+                    if (wk->native_type == 8 && wv->native_type == 8 && plain)
+                        kv_paired = strata::kernels::native_mmvq_pair(8, wk->native_data, wv->native_data, xq_,
+                                                                      kcur_ + tb * NKV * HD, vcur_ + tb * NKV * HD,
+                                                                      (int) N, kv_out, n, cs);
+                    static bool said = false;
+                    if (!said) {
+                        said = true;
+                        std::fprintf(stderr, "strata verify: R9-gpu-8 QSA K/V pair %s (K type %d, V type %d, IL %s, %d rows)\n",
+                                     kv_paired ? "engaged" : "not used", (int) wk->native_type, (int) wv->native_type,
+                                     plain ? "not taken" : "taken", (int) n);
+                    }
+                }
+                if (!kv_paired) {
                 mm(wk, kcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD));
                 mm(wv, vcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD));
+                }
                 if (qb) norm_rope(kcur_ + tb * NKV * HD, wkn, (int) (n * NKV), (int) HD, pos_k + tb * NKV);
                 else for (int t = tb; t < te; ++t) norm_rope(kcur_ + t * NKV * HD, wkn, (int) NKV, (int) HD, pos_ + t * NH);
                 if (st.kv_rot) {   // K and V rotated before they are stored (kv_q4.hpp)
