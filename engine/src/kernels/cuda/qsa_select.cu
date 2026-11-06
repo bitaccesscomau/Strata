@@ -2758,19 +2758,31 @@ __global__ void __launch_bounds__(SP_T) topk_split_emit_kernel(const float* __re
     }
 }
 
-bool topk_split_device() {
-    static int ok[64] = {};   // 0 unknown, 1 yes, 2 no
+bool topk_split_device(bool long_context) {
+    // The split radix is a retained default on Turing (sm_75). Long-context decode on sm_86 (RTX 30 series) now uses
+    // it too: at 512K context the stride is 131,074 blocks, past the register kernel's reach, so the wide kernel runs
+    // one 1,024-thread CTA per row - four CTAs on an 82-SM card, six passes over the whole score array each. On an
+    // RTX 3090 with Swift IQ3_S at 524,288 context that costs 9.00 ms per token against 8.10 with the split radix
+    // (the engine's own per-window line, same build/config/prompt, 10% decode). The ids are the radix's, so answers
+    // are unchanged. Contexts below 256K blocks keep the retained default: the register kernel fits or the wide kernel
+    // was not measured slower there, and the split's six launches are not free.
+    static int arch[64] = {};   // 0 unknown, else major * 100 + minor + 1
     static const int env = [] { const char* v = std::getenv("STRATA_TOPK_SPLIT"); return v ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
-    if (env == 0) return false;
+    if (env == 0 || env == 1) return env == 1;
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
-    if (ok[dev] == 0) {
+    if (arch[dev] == 0) {
         int major = 0, minor = 0;
-        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
-        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
-        ok[dev] = (env == 1 || strata::sm75_default(major, minor)) ? 1 : 2;   // Turing, STRATA_SM75_PERF=1
+        if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess ||
+            cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev) != cudaSuccess) {
+            cudaGetLastError();
+            return false;
+        }
+        arch[dev] = major * 100 + minor + 1;
     }
-    return ok[dev] == 1;
+    const int major = (arch[dev] - 1) / 100, minor = (arch[dev] - 1) % 100;
+    if (strata::sm75_default(major, minor)) return true;   // Turing, STRATA_SM75_PERF=1
+    return long_context && major == 8 && minor == 6;
 }
 
 bool qsa_block_topk_split(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
@@ -3032,7 +3044,7 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
 #if !defined(__HIPCC__)
     // Turing decode (a window's few queries, no block count): the split kernels above; the same ids
     if (!old && active_blocks <= 0 && max_blocks >= 16384 && s.idx_block == R &&
-        cap >= qsa_selection_width(kTopkMaxCells, s) && topk_split_device() &&
+        cap >= qsa_selection_width(kTopkMaxCells, s) && topk_split_device(max_blocks >= 65536) &&
         qsa_block_topk_split(scores, steps, nq, max_blocks, cap, ids, (cudaStream_t) stream)) {
         const cudaError_t e = cudaGetLastError();
         if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_topk (split): %s\n", cudaGetErrorString(e)); std::exit(1); }
