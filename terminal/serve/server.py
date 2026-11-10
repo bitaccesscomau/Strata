@@ -6752,8 +6752,15 @@ def prompt_progress(svc: Service):
     `(processed-cache)/(total-cache)`).  None when there is nothing to say: no PP yet, or the line that says the prompt
     is read.  An engine too old to print RESUME gives `cache` 0, which only makes a reused prefix count as work."""
     engine = svc.engine
-    if getattr(engine, "batch", 0):      # --batch: the engine's progress is one global line, not this request's
-        return None
+    if getattr(engine, "batch", 0):
+        # --batch: the engine's progress is one global line, not per request. With exactly one request
+        # in flight it is that request's, so a single long prompt keeps its progress stream even when
+        # the engine has batch slots configured (the router's status line uses it).
+        with svc.status_lock:
+            running = len(getattr(svc, "live_reqs", {}) or {})
+            reading = bool(svc.status.get("busy")) and svc.status.get("first_token") is None
+        if running != 1 or not reading:
+            return None
     progress = getattr(engine, "progress", None)
     if not progress:
         return None
@@ -7648,6 +7655,16 @@ def make_handler(svc: Service):
                     if s.get("first_token"):
                         s["tokens_per_s"] = round(svc._tok_s(), 1)
                         s["tokens_per_s_mean"] = round(svc._tok_s_mean(), 1)
+                    else:
+                        # While the prompt is being read: the same PP counters the stream carries, for
+                        # status clients that cannot see prompt_progress (batch slots, non-stream calls).
+                        progress = getattr(svc.engine, "progress", None)
+                        if progress:
+                            read, total = progress
+                            if total > 0:
+                                s["prompt_read"] = int(read)
+                                s["prompt_total"] = int(total)
+                                s["prompt_elapsed_s"] = round(float(getattr(svc.engine, "progress_ms", 0) or 0) / 1000, 1)
                 for k in ("started", "first_token"):
                     s.pop(k, None)
                 if svc.key_limits is not None:      # #5004: what each api_keys entry holds right now (names, never keys)
