@@ -17,6 +17,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <vector>
 
 namespace strata::kernels {
 namespace {
@@ -2191,6 +2193,41 @@ bool scores_halve_on() {
     return ok[dev] == 1;
 }
 
+// STRATA_SCORES_GRID=1 (opt-in): the decode scorers (block_scores_rows_kernel and block_scores_multi_kernel, the calls
+// without an active count) launch one full wave - as many CTAs as the card holds at once, from the occupancy
+// calculator - instead of a fixed 256.  Both stride over the blocks, so 256 CTAs that do not all fit run as a second,
+// mostly empty wave: on an RTX 3090 (82 SMs) the rows kernel's 3- and 4-query forms (78 / 94 registers) hold 3 / 2
+// CTAs an SM, 246 / 164 at once, and their decode calls cost 150 / 190 us at 445K cells against 72 / 100 us for 1 / 2
+// queries.  =N (N > 1): exactly N CTAs.  Every (block, query) score is still one warp's arithmetic whichever CTA runs
+// it: the same bits.  HIP: the fixed grid.
+int scores_grid(const void* kernel) {
+    static const int env = [] { const char* v = std::getenv("STRATA_SCORES_GRID"); return v ? std::atoi(v) : 0; }();
+    if (env <= 0) return 256;
+    if (env > 1) return env;
+#if defined(__HIPCC__)
+    (void) kernel;
+    return 256;
+#else
+    struct Entry { const void* k; int dev; int grid; };
+    static std::mutex mu;
+    static std::vector<Entry> cache;
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) { cudaGetLastError(); return 256; }
+    std::lock_guard<std::mutex> lk(mu);
+    for (const Entry& e : cache)
+        if (e.k == kernel && e.dev == dev) return e.grid;
+    int per_sm = 0, sms = 0, grid = 256;
+    if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, kernel, SCORE_WARPS * 32, 0) == cudaSuccess &&
+        cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) == cudaSuccess && per_sm > 0 && sms > 0)
+        grid = per_sm * sms;
+    cudaGetLastError();
+    cache.push_back({kernel, dev, grid});
+    std::fprintf(stderr, "qsa select: STRATA_SCORES_GRID=1: a decode scorer on CUDA%d launches %d CTAs (%d an SM)\n", dev,
+                 grid, per_sm);
+    return grid;
+#endif
+}
+
 void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
                       int64_t max_blocks, const QsaShapes& s, float* scores, void* stream, int64_t active_blocks) {
     if (nq <= 0) return;
@@ -2222,8 +2259,9 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
             if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores halve: %s\n", cudaGetErrorString(e)); std::exit(1); }
             return;
         }
-        block_scores_multi_kernel<<<256, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(pooled, dead, q_idx, steps, (int) nq,
-                                                                                     max_blocks, scores, scores_early_exit());
+        block_scores_multi_kernel<<<scores_grid((const void*) block_scores_multi_kernel), SCORE_WARPS * 32, 0,
+                                    (cudaStream_t) stream>>>(pooled, dead, q_idx, steps, (int) nq, max_blocks, scores,
+                                                             scores_early_exit());
         const cudaError_t e = cudaGetLastError();
         if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores multi: %s\n", cudaGetErrorString(e)); std::exit(1); }
         return;
@@ -2283,10 +2321,10 @@ bool qsa_block_scores_rows(const float* pooled, const float* dead, const float* 
     if (nq > 4 || s.idx_dim != IDX_DIM || s.idx_n_head != IDX_HEADS || s.idx_block != R) return false;
     cudaStream_t st = (cudaStream_t) stream;
     const int n = (int) nq;
-    if (n == 1) block_scores_rows_kernel<1><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, n, max_blocks, scores);
-    else if (n == 2) block_scores_rows_kernel<2><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, n, max_blocks, scores);
-    else if (n == 3) block_scores_rows_kernel<3><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, n, max_blocks, scores);
-    else block_scores_rows_kernel<4><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, n, max_blocks, scores);
+    if (n == 1) block_scores_rows_kernel<1><<<scores_grid((const void*) block_scores_rows_kernel<1>), SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, n, max_blocks, scores);
+    else if (n == 2) block_scores_rows_kernel<2><<<scores_grid((const void*) block_scores_rows_kernel<2>), SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, n, max_blocks, scores);
+    else if (n == 3) block_scores_rows_kernel<3><<<scores_grid((const void*) block_scores_rows_kernel<3>), SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, n, max_blocks, scores);
+    else block_scores_rows_kernel<4><<<scores_grid((const void*) block_scores_rows_kernel<4>), SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, n, max_blocks, scores);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores rows: %s\n", cudaGetErrorString(e)); std::exit(1); }
     return true;
