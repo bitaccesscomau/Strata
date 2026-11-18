@@ -106,6 +106,7 @@ int main(int argc, char** argv) {
     int device = 0, iters = 100;
     int64_t ctx = 131072, max_ctx = 262144;
     bool rows = false, dense = true;
+    const char* dump = nullptr;   // --dump FILE: the scores rows and ids of T = 1..4 (to compare two settings' bits)
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) device = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--iters") == 0 && i + 1 < argc) iters = std::atoi(argv[++i]);
@@ -113,9 +114,10 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--max-context") == 0 && i + 1 < argc) max_ctx = std::atoll(argv[++i]);
         else if (std::strcmp(argv[i], "--rows") == 0) rows = true;
         else if (std::strcmp(argv[i], "--no-dense") == 0) dense = false;
+        else if (std::strcmp(argv[i], "--dump") == 0 && i + 1 < argc) dump = argv[++i];
         else {
             std::fprintf(stderr, "usage: qsa_rows_bench [--device N] [--iters 100] [--ctx 131072] [--max-context 262144] "
-                                 "[--rows] [--no-dense]\n");
+                                 "[--rows] [--no-dense] [--dump FILE]\n");
             return 2;
         }
     }
@@ -272,6 +274,26 @@ int main(int argc, char** argv) {
     const double per_row = (t_layer.us[MAXT] - t_layer.us[1]) / (MAXT - 1);
     std::printf("-- per row: %.1f us a QSA layer -> x4 layers (stage 0) %.2f ms, x8 layers (stage 1) %.2f ms\n", per_row,
                 4 * per_row / 1000.0, 8 * per_row / 1000.0);
+    if (dump != nullptr) {   // each T: every row's scores over blocks 0..n_bid, then its selection (the rest is never read)
+        std::FILE* f = std::fopen(dump, "wb");
+        if (f == nullptr) { std::perror(dump); return 2; }
+        for (int T = 1; T <= MAXT; ++T) {
+            ck(cudaMemset(scores, 0xFF, (size_t) MAXT * max_blocks * 4), "fill");
+            ck(cudaMemset(ids, 0x7F, (size_t) MAXT * cap * 4), "fill");
+            k::qsa_block_scores(pooled, dead, q_idx, steps, T, max_blocks, s, scores, st);
+            k::qsa_block_topk(scores, steps, T, max_blocks, cap, s, ids, st);
+            ck(cudaDeviceSynchronize(), "dump");
+            const std::vector<float> sc = download(scores, (size_t) T * max_blocks);
+            const std::vector<int32_t> id = download(ids, (size_t) T * cap);
+            for (int t = 0; t < T; ++t) {
+                const int64_t nb = hst[(size_t) t * k::kStepCount + k::kStepNBid] + 1;
+                std::fwrite(sc.data() + (size_t) t * max_blocks, 4, (size_t) nb, f);
+                std::fwrite(id.data() + (size_t) t * cap, 4, (size_t) cap, f);
+            }
+        }
+        std::fclose(f);
+        std::printf("-- dumped the scores and ids of T = 1..%d to %s\n", MAXT, dump);
+    }
 
     bool ok = true;
     if (rows) {
