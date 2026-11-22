@@ -15073,6 +15073,18 @@ int main(int argc, char** argv) {
         // lower is neither copied nor computed; STRATA_ROUTE_TAIL_SKIP=7 turns it on (KL 0.0126 against exact routing, decode x1.24 to x1.29 on UD-Q4_K_XL, RTX
         // 5090; docs/DETAILS.md), 1 to 9 pick a rank.  An unset value is rank 0 (strata/core/tail_skip_default.hpp), so this start-up sets nothing.
         // Nothing to say when every expert is in VRAM.
+        // Downstream champion (0.1.61's rule): off with --batch slots.  A verify window then mixes requests, so one request's skip
+        // would depend on another's tokens and a conversation in a slot would not decode the tokens it decodes alone (2x RTX 3090:
+        // 4-slot greedy 2/4 and 2-slot 1/2 identical with STRATA_ROUTE_TAIL_SKIP=7, 4/4 and 2/2 with it off).
+        // STRATA_ROUTE_TAIL_SKIP_BATCH=1 keeps a set rank beside batch slots.
+        if (o.batch > 0 && strata::core::tail_skip_rank() > 0) {
+            const char* tsb = std::getenv("STRATA_ROUTE_TAIL_SKIP_BATCH");
+            if (!(tsb != nullptr && std::strcmp(tsb, "1") == 0)) {
+                strata::core::set_tail_skip_rank(0);
+                std::fprintf(stderr, "strata serve: STRATA_ROUTE_TAIL_SKIP is off with --batch slots (a window mixes requests, and one "
+                                     "request's skip would depend on another's tokens); STRATA_ROUTE_TAIL_SKIP_BATCH=1 keeps it on\n");
+            }
+        }
         if (strata::core::tail_skip_rank() > 0 && !all_experts_resident)
             std::fprintf(stderr, "strata serve: STRATA_ROUTE_TAIL_SKIP=%d is ON: a missed expert that every token of a verify window routes at rank %d or "
                                  "lower is skipped (answers differ slightly); it is off when STRATA_ROUTE_TAIL_SKIP is not set or is 0\n",

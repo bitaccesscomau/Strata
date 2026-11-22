@@ -42635,6 +42635,39 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_ROUTE_TAIL_SKIP_BATCH",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "engine/src/program/generate.cpp",
+     "line": 14486,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "",
+   "first_date": "2026-11-23",
+   "since": null,
+   "last_commit": "",
+   "last_date": "2026-11-23",
+   "status": "opt-in",
+   "owner": "program",
+   "note": "[downstream champion] 0.1.61's rule: with --batch slots a set STRATA_ROUTE_TAIL_SKIP rank is turned off at start-up (a verify window mixes requests, so one request's skip would depend on another's tokens; 2x RTX 3090 4-slot greedy 2/4 identical to solo with rank 7, 4/4 with it off). =1 keeps the rank beside batch slots, which is upstream v0.2.18's behaviour.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_ROUTE_WIN",
    "backends": [
     "cuda-hip"
