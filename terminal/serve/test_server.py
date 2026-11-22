@@ -6866,15 +6866,23 @@ class AnswerBeforeTheBody(unittest.TestCase):
 
 
 class PromptProgressBatch(unittest.TestCase):
-    """#837: under --batch the engine's progress is one global line: prompt_progress() says nothing."""
+    """#837: under --batch the engine's progress is one global line. It is a request's own only while that request is
+    the one in flight and still reading its prompt (champion 0003); otherwise prompt_progress() says nothing."""
 
-    def test_nothing_under_batch(self):
-        from serve.server import prompt_progress
-        engine = SimpleNamespace(progress=(512, 4096), progress_ms=900, reused=0, batch=0)
-        svc = SimpleNamespace(engine=engine)
-        self.assertEqual(prompt_progress(svc), {"total": 4096, "cache": 0, "processed": 512, "time_ms": 900})
-        engine.batch = 2
-        self.assertIsNone(prompt_progress(svc))
+    def svc(self, batch, live, busy=True, first_token=None):
+        engine = SimpleNamespace(progress=(512, 4096), progress_ms=900, reused=0, batch=batch)
+        return SimpleNamespace(engine=engine, status_lock=threading.Lock(), live_reqs={i: None for i in range(live)},
+                               status={"busy": busy, "first_token": first_token})
+
+    def test_one_reading_request_keeps_its_progress_under_batch(self):
+        want = {"total": 4096, "cache": 0, "processed": 512, "time_ms": 900}
+        self.assertEqual(prompt_progress(self.svc(batch=0, live=0)), want)
+        self.assertEqual(prompt_progress(self.svc(batch=2, live=1)), want)
+
+    def test_nothing_under_batch_with_two_requests_or_after_the_first_token(self):
+        self.assertIsNone(prompt_progress(self.svc(batch=2, live=2)))
+        self.assertIsNone(prompt_progress(self.svc(batch=2, live=1, first_token=1.0)))
+        self.assertIsNone(prompt_progress(self.svc(batch=2, live=1, busy=False)))
 
 
 class VisionArgs(unittest.TestCase):
