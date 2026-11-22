@@ -19867,10 +19867,47 @@ int main(int argc, char** argv) {
                 slot_source < 0 && lent_slot < 0 && req_imgs.empty() &&
                 strata::program::conv_cache::rewind_keep(live.data(), (int64_t) live.size(), ids.data(), resume,
                                                          o.conversation_cache_rewind_keep);
-            // (a batch slot that holds this conversation does not make the park unneeded: with the park skipped on two cards
-            // - #5864's STRATA_SLOT_PARK_SKIP - the turn after it read the slot's K/V instead of the parked image and one
-            // token differed from the park as before)
-            const bool keep_branch = pin_sibling || rewind_skip;
+            // STRATA_SLOT_PARK_SKIP (on with batch slots; =0: off).  The main sessions hold a conversation that a batch
+            // slot holds too, at least as far - the slot it was admitted into, which went on decoding it - and the
+            // checkpoints here that other requests start from are parked already: the chain's root (the system prompt
+            // other chats borrow) and a pinned prefix.  The slot is where the conversation's next turn continues from,
+            // and what the slot holds is parked when another conversation takes the slot (park_slot), so a park here
+            // writes the whole snapshot to keep earlier turn boundaries of a conversation that goes on elsewhere:
+            // 0.45-0.65 s at 178K tokens on 2x RTX 3090, every slot stopped, at each admission.  (Downstream champion
+            // series: upstream took #5864 without it, having seen one token of the turn after a skipped park differ on
+            // two cards - the turn read the slot's K/V instead of the parked image; =0 is upstream's behaviour.)
+            static const bool slot_park_skip = [] {
+                const char* v = std::getenv("STRATA_SLOT_PARK_SKIP");
+                return !(v != nullptr && v[0] == '0');
+            }();
+            int slot_keeps = -1;
+            if (slot_park_skip && live_ok && !live.empty() && live_imgs.empty() && !pin_sibling && !rewind_skip &&
+                park_worth && (borrow || !from_live || incoming || slot_source >= 0)) {   // (where a park would follow)
+                for (int b = 0; b < (int) bs.size() && slot_keeps < 0; ++b) {
+                    const BSlot& sl = bs[(size_t) b];
+                    if ((sl.active || sl.cached) && !sl.tainted && !sl.img && !sl.partial && sl.cvec == cvec_cached &&
+                        sl.ids.size() >= live.size() && std::equal(live.begin(), live.end(), sl.ids.begin()))
+                        slot_keeps = b;
+                }
+                // (a root or a pinned prefix only this chain has: the park keeps it)
+                const ConvCheckpoint* root = nullptr;
+                for (const ConvCheckpoint& c : checks)
+                    if (root == nullptr || c.ids.size() < root->ids.size()) root = &c;
+                for (const ConvCheckpoint& c : checks)
+                    if (slot_keeps >= 0 && (c.pinned || &c == root) && !conversations.has_checkpoint(c.ids, c.imgs, cvec_cached))
+                        slot_keeps = -1;
+                if (slot_keeps >= 0)
+                    std::fprintf(stderr, "strata serve: conversation cache: skip parking (slot %d holds this conversation, "
+                                         "%zu tokens of it against the %zu here; the chain's root is parked)\n",
+                                 slot_keeps, bs[(size_t) slot_keeps].ids.size(), live.size());
+            }
+            // ... and the slot a request is admitted into held this conversation's last turn: the request left at most
+            // --conversation-cache-rewind-keep tokens of it behind (the stripped reply), which are not parked before
+            // the slot takes the new turn (park_slot at the admission), as on the solo path above
+            const bool slot_rewind_skip =
+                slot_park_skip && admit_slot >= 0 && slot_source == admit_slot && o.conversation_cache_rewind_keep > 0 &&
+                (int64_t) bs[(size_t) admit_slot].ids.size() - slot_tokens <= o.conversation_cache_rewind_keep;
+            const bool keep_branch = pin_sibling || rewind_skip || slot_keeps >= 0;
             if (rewind_skip)
                 std::fprintf(stderr,
                              "strata serve: conversation cache: park not needed (the rewind keeps %lld of %lld tokens "
@@ -23748,7 +23785,11 @@ int main(int argc, char** argv) {
                 bool cont = !cancelled && produced_n == 1 && admit_max_new > 1 && std::strcmp(finish, "length") == 0 &&
                             (int64_t) live.size() == p;
                 const auto tc0 = Clock::now();
-                if (cont) park_slot(admit_slot);   // the conversation the slot holds, before this one overwrites it
+                // the conversation the slot holds, before this one overwrites it (not the reply this turn left behind
+                // in its own slot: slot_rewind_skip)
+                if (cont && !slot_rewind_skip) park_slot(admit_slot);
+                else if (cont && trace)
+                    std::fprintf(stderr, "strata trace: slot %d not parked before its own conversation's next turn\n", admit_slot);
                 if (cont && !copy_to_slot(admit_slot, live, err)) {
                     std::fprintf(stderr, "strata serve: batch admission failed: %s\n", err.c_str());
                     bs[(size_t) admit_slot].cached = false;   // its sessions may be half written
