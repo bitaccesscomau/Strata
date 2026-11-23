@@ -93,3 +93,19 @@ target_link_libraries(strata_inkling_cuda PUBLIC
 
 target_compile_definitions(strata-inkling PRIVATE INKLING_ENABLE_CUDA=1)
 target_link_libraries(strata-inkling PRIVATE strata_inkling_cuda)
+
+# Development harness (not shipped in a release feed): the standalone CUDA benchmark with --prof, the per-stage
+# breakdown of prompt reading and decode, and --parity.  ops/inkling-r24/ink_build.sh builds it when asked.
+if(NOT TARGET strata-inkling-cuda)
+  add_executable(strata-inkling-cuda "${CMAKE_CURRENT_SOURCE_DIR}/ink_cuda_main.cu")
+  target_include_directories(strata-inkling-cuda PRIVATE ${_ink_cuda_inc})
+  set_target_properties(strata-inkling-cuda PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON
+                                                       CUDA_ARCHITECTURES "${STRATA_INK_CUDA_ARCHS}")
+  target_compile_options(strata-inkling-cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+  target_link_libraries(strata-inkling-cuda PRIVATE strata_inkling_cuda CUDA::cudart CUDA::cublas)
+  target_compile_definitions(strata-inkling-cuda PRIVATE INKLING_ENABLE_CUDA=1)
+  if(TARGET strata_inkling_ep_cuda)
+    target_link_libraries(strata-inkling-cuda PRIVATE strata_inkling_ep_cuda)
+    target_compile_definitions(strata-inkling-cuda PRIVATE INKLING_ENABLE_EP_CUDA=1)
+  endif()
+endif()
