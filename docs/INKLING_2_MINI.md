@@ -141,3 +141,35 @@ Two gates came out clean this round:
   6,330 tokens, first token 2.908 s → **0.092 s**.
 - **Two slots at 256K pass.** Two concurrent 100,055- and 100,054-token requests with passphrases at 85 % depth both
   answered exactly (wall 173.5 s, 256K, k8v8, chunk 2048). The served entry now runs `--parallel 2`.
+
+## Third campaign: the verify window is the lever that moves bytes (2026-11-25)
+
+Decode had been flat against every config knob because the step's cost is the **union of experts its rows route to**,
+and the window size was a literal 12. `--draft-nodes` (or `STRATA_INK_SPEC_NODES`) now sets it, 1..12, and the sweep at
+32K context, one card, k8v8, chunk 2048, served path:
+
+| nodes | 1K greedy | 1K sampled | 30K greedy | 30K sampled | 32K greedy | 32K sampled |
+|---:|---:|---:|---:|---:|---:|---:|
+| 12 (a) | 98.5 | 73.5 | 65.5 | 62.6 | 63.1 | 71.7 |
+| 8 | 97.1 | 72.7 | 65.2 | 61.9 | 63.0 | 71.0 |
+| 6 | 98.3 | 72.2 | 71.5 | 61.5 | 66.4 | 70.8 |
+| **4** | **106.9** | 71.7 | **73.0** | 61.3 | **72.4** | 70.7 |
+| 12 (b) | 96.1 | 72.1 | 64.8 | 61.4 | 62.1 | 70.7 |
+
+A second window repeated four nodes (107.6 / 106.5 at 1K greedy, 72.4-73.7 at 30K) and showed three and two nodes below
+it (104.0 / 103.9 at 1K, 69.3 / 69.2 at 32K), so four is the floor of useful acceptance. At depth, in the 256K entry
+with a 60K prompt, four nodes gave 53.6 tok/s against 50.2-50.5 (+6.4%) with prefill unchanged. A step at four nodes
+carries about 5-6 GB of weights against 9-10 GB at twelve.
+
+### KV dtype at depth: k8v4 gates clean, but is workload-dependent
+
+| config | 60K prompt | 131K prompt | needle at 261,888 |
+|---|---:|---:|---|
+| k8v8, 4 nodes | 53.5 | 33.4 | passed earlier |
+| **k8v4, 4 nodes** | **58.9 (+10.1%)** | **35.3 (+5.7%)** | **passed** |
+
+On the served path at 32K context, four interleaved runs say k8v4 wins 1K sampled (+20.2%), 32K greedy (+11.7%) and 1K
+greedy (+4.1%), but loses 30K greedy (−3.7%) and 32K sampled (−20.3%). Past the 3% regression bar, so the served entry
+keeps k8v8; k8v4 stays the documented long-context option.
+
+Served entry: `--max-context 262144 --kv k8v8 --chunk 2048 --parallel 2 --draft-nodes 4`.
