@@ -35,6 +35,10 @@ struct BackendOpts {
     std::string kv_offload = "auto"; // "auto" | "on" | "off" (zero-copy mapped pinned host global KV spill)
     bool enable_dspark = true;
     int spec_beam = -1;          // --draft-beam N: 1 = one linear chain (the block drafter), 4 = the beam tree (default); < 0 = STRATA_INK_SPEC_BEAM or 4
+    int draft_max_ctx = -1;      // --draft-max-ctx N (STRATA_INK_DRAFT_MAX_CTX): above this position a step skips drafting and
+                                 // emits one plain token. Measured on one RTX 3090 with SQ-15: drafting pays up to ~90K
+                                 // (60K: 53.7 against 47.7) and costs from ~110K (131K: 33.5 against 38.4), so 100000 is the
+                                 // served threshold. < 0 = no limit, the upstream behaviour.
     int spec_nodes = -1;         // --draft-nodes N: verify-window size, 1..12 (default 12); < 0 = STRATA_INK_SPEC_NODES or 12. The window sets
                                  // both how many tokens a step can accept and how many DISTINCT experts it routes to: at top-8 over 128 experts
                                  // and 5 rows the union is already a third of the experts, so a wider window reads more weight per step

@@ -117,6 +117,8 @@ public:
     bool init(const InkModelFile& mf, const BackendOpts& opts, std::string& err) override {
         if (const char* e = std::getenv("STRATA_INK_SPEC_BEAM")) spec_cfg_.beam = std::atoi(e);
         if (const char* e = std::getenv("STRATA_INK_SPEC_NODES")) spec_cfg_.nodes = std::atoi(e);
+        if (const char* e = std::getenv("STRATA_INK_DRAFT_MAX_CTX")) spec_cfg_.max_ctx = std::atoi(e);
+        if (opts.draft_max_ctx >= 0) spec_cfg_.max_ctx = opts.draft_max_ctx;
         if (const char* e = std::getenv("STRATA_INK_SPEC_COST")) spec_cfg_.cost = (float)std::atof(e);
         if (const char* e = std::getenv("STRATA_INK_SPEC_PLAIN")) spec_cfg_.plain = (float)std::atof(e);
         if (opts.spec_beam > 0) spec_cfg_.beam = opts.spec_beam;
@@ -1070,6 +1072,9 @@ public:
         int* out_drafted,
         std::string& /*err*/) override {
         if (!initialized_ || model_.ls_active || !dspark_ || !dspark_->ready || slot != 0 || dspark_slot_ != 0) return 0;
+        // Past draft_max_ctx the drafter's window no longer pays for itself (measured: +12% at 60K, -15% at 131K), so the
+        // step emits one plain token: returning 0 is the same path as "no drafter", which the serve loop already handles.
+        if (spec_cfg_.max_ctx > 0 && anchor_pos >= spec_cfg_.max_ctx) return 0;
         if (anchor_pos <= 0 || anchor_pos + 12 >= eff_max_ctx_ || anchor_pos + 12 >= dspark_->max_ctx || max_emit < 1 || !out_emitted) return 0;
         if (!runner_->ensure_global_kv_cap(anchor_pos + 12) || !dspark_->ensure_ctx_cap(anchor_pos + 12)) return 0;
 
@@ -1210,7 +1215,7 @@ private:
     int max_slots_ = 1;
     int eff_max_ctx_ = 4096;
     // The drafter's window shape: --draft-beam / --draft-cost / --draft-plain (or STRATA_INK_SPEC_BEAM / _COST / _PLAIN), STRATA_INK_SPEC_LOG=1 prints stats
-    struct SpecCfg { int beam = 4; int nodes = 12; float cost = 4.2f; float plain = 0.0f; bool log = false; } spec_cfg_;
+    struct SpecCfg { int beam = 4; int nodes = 12; int max_ctx = -1; float cost = 4.2f; float plain = 0.0f; bool log = false; } spec_cfg_;
     bool kv_grow_failed_ = false;    // the last forward_batch ended only because the global K/V could not grow
     int eff_chunk_run_ = 0;          // the prefill chunk the runner really got (after auto / halve-on-fail)
     int dspark_slot_ = -1;
