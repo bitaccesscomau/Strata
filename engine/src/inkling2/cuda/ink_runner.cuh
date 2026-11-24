@@ -722,6 +722,8 @@ struct InkCudaModel {
             const size_t need = (size_t)V * kInkHidden * sizeof(__nv_bfloat16);
             INK_CK(ink_cuda_mem_info(&vfree, &vtot));
             __nv_bfloat16* w_tile = nullptr;
+            cudaStream_t deq_st = nullptr;   // the model is built before the runner's stream exists: own stream, freed below
+            cudaStreamCreateWithFlags(&deq_st, cudaStreamNonBlocking);
             if (vfree > need + (4096ull << 20) && cudaMalloc(&d_unembed_bf16, need) == cudaSuccess) {
                 const int tile_n = (int)kInkDsparkInter;
                 if (cudaMalloc(&w_tile, (size_t)tile_n * kInkHidden * sizeof(__nv_bfloat16)) == cudaSuccess) {
@@ -730,13 +732,13 @@ struct InkCudaModel {
                         const int nt = std::min(tile_n, V - n0);
                         dim3 dg((kInkHidden + 255) / 256, nt);
                         const uint8_t* Wsub = d_trunk + ui.off + (size_t)n0 * row_b;
-                        if (ui.fmt == FMT_S5_K)      k_ink_sk_to_bf16<FMT_S5_K><<<dg, 256, 0, st>>>(Wsub, w_tile, nt, kInkHidden);
-                        else if (ui.fmt == FMT_S6_K) k_ink_sk_to_bf16<FMT_S6_K><<<dg, 256, 0, st>>>(Wsub, w_tile, nt, kInkHidden);
-                        else                         k_ink_sk_to_bf16<FMT_S8_K><<<dg, 256, 0, st>>>(Wsub, w_tile, nt, kInkHidden);
+                        if (ui.fmt == FMT_S5_K)      k_ink_sk_to_bf16<FMT_S5_K><<<dg, 256, 0, deq_st>>>(Wsub, w_tile, nt, kInkHidden);
+                        else if (ui.fmt == FMT_S6_K) k_ink_sk_to_bf16<FMT_S6_K><<<dg, 256, 0, deq_st>>>(Wsub, w_tile, nt, kInkHidden);
+                        else                         k_ink_sk_to_bf16<FMT_S8_K><<<dg, 256, 0, deq_st>>>(Wsub, w_tile, nt, kInkHidden);
                         INK_CK(cudaMemcpyAsync(d_unembed_bf16 + (size_t)n0 * kInkHidden, w_tile,
-                                               (size_t)nt * kInkHidden * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice, st));
+                                               (size_t)nt * kInkHidden * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice, deq_st));
                     }
-                    INK_CK(cudaStreamSynchronize(st));
+                    INK_CK(cudaStreamSynchronize(deq_st));
                 } else {
                     cudaGetLastError();
                     cudaFree(d_unembed_bf16);
@@ -744,6 +746,7 @@ struct InkCudaModel {
                 }
                 if (w_tile) { cudaFree(w_tile); w_tile = nullptr; }
             }
+            cudaStreamDestroy(deq_st);
         }
 
         std::fprintf(stderr, "[InkCUDA] Loaded %s (%s): trunk=%.2f GB (%.2fs), experts=%zu VRAM / %zu host (%.2fs, hyb=%d, promo=%d, pf_buf=%.0fMB), sm120_tc=%d, screen=%d\n",
