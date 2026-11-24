@@ -173,3 +173,17 @@ greedy (+4.1%), but loses 30K greedy (−3.7%) and 32K sampled (−20.3%). Past 
 keeps k8v8; k8v4 stays the documented long-context option.
 
 Served entry: `--max-context 262144 --kv k8v8 --chunk 2048 --parallel 2 --draft-nodes 4`.
+
+## Fourth campaign: shape, chunk, and a four-slot entry (2026-11-25)
+
+At four nodes the window's *shape* stops mattering: beam 1, 2 and 4 give the same sampled cells (72 / 61.6 / 71 at
+1K / 30K / 32K) and differ by noise on greedy, and `--draft-adapt` costs 7% on 30K sampled. The sampled-to-greedy gap
+is acceptance, not shape.
+
+A larger prefill chunk is the second served/bench disagreement: at a 30K prompt `--chunk 4096` beats 2048 by 1.2% in
+the harness and loses 4.6% (30K greedy) and 7.6% (32K sampled) on the served path; at 256K it also leaves 3,977 MiB
+free against 5,759, less than one 256K slot's K/V. 2048 stays.
+
+Four slots at 64K are now a served entry of their own (`strata/inkling-2-mini-sq-15-64k`, `--parallel 4`): four
+concurrent 60K-token requests with passphrases at 85% depth all answered, and through the router four concurrent 1K
+generations ran **122.2 tok/s aggregate** (30.5 a stream) against 112.6 for one chat alone.
