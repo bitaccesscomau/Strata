@@ -281,3 +281,24 @@ Three rounds of levers then landed inside noise (eight-wide S_K dequant, S_K 64-
 under the draft cutoff tied (k8v4 +0.5% at 131K with plain tokens), so the configuration is settled. What remains is
 kernel work: the expert GEMM at prefill (56% of a chunk at ~14% of the int8 tensor cores) and the M=1 expert GEMV at
 depth (3x above its byte floor), then drafter acceptance. See the bench kit's `PLAN.md` STATUS for the ranked list.
+
+## Acceptance gates on the served configuration (2026-11-25)
+
+Run on the exact served argv, at 256K and at 32K:
+
+| gate | result |
+|---|---|
+| answers | PASS 5 of 5; the same greedy request twice gives identical tokens |
+| read | PASS 7 of 7, ladder to a 250K prompt |
+| passphrase | PASS at 261,888 tokens (the whole 256K window) |
+| decode | PASS 6 of 6: 108.1 / 72.5 / 73.6 / 61.8 / 72.8 / 71.1 tok/s |
+| turns | PASS: `RESUME 6330` of 6,330; follow-up first token 0.094 s |
+| picture | PASS: "A red circle." |
+| stop | PASS in a read and in a decode; the resumed prompt equals a fresh read |
+| limits | PASS: clean refusals at the context boundary |
+| edges | FAIL: 6-8 of 12 prompt lengths differ between `--chunk 512` and `--chunk 64` |
+
+`edges` is chunk *invariance*, not correctness: it fails with the prefill tile off and with drafting off too (different
+lengths each time), so it is the engine's chunk-order arithmetic and not this work. Both served entries use one chunk
+(2048), so it does not reach production. The pinned recipe, with the engine sha, the weights revision, both launch lines
+and the gate artefacts, is in the bench kit's `best-config.json`.
