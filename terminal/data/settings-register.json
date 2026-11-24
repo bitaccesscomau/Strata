@@ -34272,11 +34272,11 @@
    "since": null,
    "last_commit": "7fe4d54a50",
    "last_date": "2026-11-22",
-   "status": "research",
+   "status": "retired",
    "owner": "program",
-   "note": "[downstream champion] diagnostic for STRATA_PIPE_ADAPT_STAGED: reads each stage's residency table back at every pipelined launch and counts entries unlike the host's (a sync per launch).",
+   "note": "[downstream champion] not carried onto v0.2.21: the adaptive tier's blocking round was rewritten upstream (adapt_tick, per-stage, and the opt-in --adapt-async 1 thread), so the staged round is re-expressed by --adapt-async rather than re-merged blind; the commit stays on champion/v0.2.19-port. Measure --adapt-async 1 in the gates.",
    "retire_after": "",
-   "retired_in": ""
+   "retired_in": "v0.2.21 port"
   },
   {
    "name": "STRATA_PIPE_ADAPT_EVERY",
@@ -34358,11 +34358,11 @@
    "since": null,
    "last_commit": "7fe4d54a50",
    "last_date": "2026-11-22",
-   "status": "default",
+   "status": "retired",
    "owner": "program",
-   "note": "[downstream champion] on unless 0: with STRATA_PIPE_ADAPT_EVERY on a layer split, an adaptive-tier round is taken a card at a time between its windows instead of emptying the pipeline (=0: as before; also as before with one stage, --peer-device, helper GPUs, STRATA_ADAPT_OVERLAP, the resident RAM mode). 2x RTX 3090, two 177K conversations: +5.5% over the round (docs/BATCHING.md).",
+   "note": "[downstream champion] not carried onto v0.2.21: the adaptive tier's blocking round was rewritten upstream (adapt_tick, per-stage, and the opt-in --adapt-async 1 thread), so the staged round is re-expressed by --adapt-async rather than re-merged blind; the commit stays on champion/v0.2.19-port. Measure --adapt-async 1 in the gates.",
    "retire_after": "",
-   "retired_in": ""
+   "retired_in": "v0.2.21 port"
   },
   {
    "name": "STRATA_PIPE_BYIELD_NODRAIN",
