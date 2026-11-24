@@ -182,13 +182,17 @@ public:
         const int kv_offload_mode = (opts.kv_offload == "on") ? 1 : ((opts.kv_offload == "off") ? -1 : 0);
         kv_dtype_ = opts.kv_dtype;
         if (opts.kv_dtype_auto) {
+            // The memory-saving choice is K8V8, not FP8_E4M3: over five interleaved served runs at 64K context on one
+            // RTX 3090 (Inkling 2 Mini SQ-15, chunk 2048) FP8_E4M3 was the slowest of fp16 / k8v8 / fp8 in every cell
+            // (30K sampled 50.7-51.3 tok/s against K8V8's 61.4-61.6 and fp16's 61.0; 64K greedy 44.1-44.3 against 52.4-52.6
+            // and 46.7), at the same bytes per element. K8V8 wins the same memory back and is the deeper-context winner.
             if (max_slots_ >= 16) {
-                kv_dtype_ = KvDtype::FP8_E4M3;
+                kv_dtype_ = KvDtype::K8V8;
             } else if (kv_offload_mode < 0) {
                 if (prop.totalGlobalMem <= (13ull << 30)) {
-                    kv_dtype_ = KvDtype::FP8_E4M3;
+                    kv_dtype_ = KvDtype::K8V8;
                 } else if (sm_cc >= 89 && opts.max_ctx > 16384 && prop.totalGlobalMem < (40ull << 30)) {
-                    kv_dtype_ = KvDtype::FP8_E4M3;
+                    kv_dtype_ = KvDtype::K8V8;
                 }
             }
         }
