@@ -897,6 +897,14 @@ int main(int argc, char** argv) {
             cfg.bopts.enable_dspark = (cfg.draft_mode != "off");
         } else if (a == "--draft-beam") {
             cfg.bopts.spec_beam = std::atoi(next().c_str());
+        } else if (a == "--draft-nodes") {
+            cfg.bopts.spec_nodes = std::atoi(next().c_str());
+        } else if (a == "--draft-max-ctx") {
+            cfg.bopts.draft_max_ctx = std::atoi(next().c_str());
+        } else if (a == "--draft-nodes-deep") {
+            cfg.bopts.spec_nodes_deep = std::atoi(next().c_str());
+        } else if (a == "--draft-nodes-switch") {
+            cfg.bopts.spec_nodes_switch = std::atoi(next().c_str());
         } else if (a == "--draft-cost") {
             cfg.bopts.spec_cost = std::atof(next().c_str());
         } else if (a == "--draft-adapt") {

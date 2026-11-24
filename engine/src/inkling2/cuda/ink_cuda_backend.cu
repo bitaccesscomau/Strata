@@ -116,12 +116,21 @@ public:
 
     bool init(const InkModelFile& mf, const BackendOpts& opts, std::string& err) override {
         if (const char* e = std::getenv("STRATA_INK_SPEC_BEAM")) spec_cfg_.beam = std::atoi(e);
+        if (const char* e = std::getenv("STRATA_INK_SPEC_NODES")) spec_cfg_.nodes = std::atoi(e);
+        if (const char* e = std::getenv("STRATA_INK_DRAFT_MAX_CTX")) spec_cfg_.max_ctx = std::atoi(e);
+        if (opts.draft_max_ctx >= 0) spec_cfg_.max_ctx = opts.draft_max_ctx;
+        if (const char* e = std::getenv("STRATA_INK_SPEC_NODES_DEEP")) spec_cfg_.nodes_deep = std::atoi(e);
+        if (const char* e = std::getenv("STRATA_INK_SPEC_NODES_SWITCH")) spec_cfg_.nodes_switch = std::atoi(e);
+        if (opts.spec_nodes_deep > 0) spec_cfg_.nodes_deep = opts.spec_nodes_deep;
+        if (opts.spec_nodes_switch > 0) spec_cfg_.nodes_switch = opts.spec_nodes_switch;
         if (const char* e = std::getenv("STRATA_INK_SPEC_COST")) spec_cfg_.cost = (float)std::atof(e);
         if (const char* e = std::getenv("STRATA_INK_SPEC_PLAIN")) spec_cfg_.plain = (float)std::atof(e);
         if (opts.spec_beam > 0) spec_cfg_.beam = opts.spec_beam;
+        if (opts.spec_nodes > 0) spec_cfg_.nodes = opts.spec_nodes;
         if (opts.spec_cost > 0.0) spec_cfg_.cost = (float)opts.spec_cost;
         if (opts.spec_plain >= 0.0) spec_cfg_.plain = (float)opts.spec_plain;
         spec_cfg_.beam = std::max(1, std::min(8, spec_cfg_.beam));
+        spec_cfg_.nodes = std::max(1, std::min(12, spec_cfg_.nodes));
         spec_cfg_.log = std::getenv("STRATA_INK_SPEC_LOG") != nullptr;
         cleanup();
         int n_dev = 0;
@@ -182,13 +191,17 @@ public:
         const int kv_offload_mode = (opts.kv_offload == "on") ? 1 : ((opts.kv_offload == "off") ? -1 : 0);
         kv_dtype_ = opts.kv_dtype;
         if (opts.kv_dtype_auto) {
+            // The memory-saving choice is K8V8, not FP8_E4M3: over five interleaved served runs at 64K context on one
+            // RTX 3090 (Inkling 2 Mini SQ-15, chunk 2048) FP8_E4M3 was the slowest of fp16 / k8v8 / fp8 in every cell
+            // (30K sampled 50.7-51.3 tok/s against K8V8's 61.4-61.6 and fp16's 61.0; 64K greedy 44.1-44.3 against 52.4-52.6
+            // and 46.7), at the same bytes per element. K8V8 wins the same memory back and is the deeper-context winner.
             if (max_slots_ >= 16) {
-                kv_dtype_ = KvDtype::FP8_E4M3;
+                kv_dtype_ = KvDtype::K8V8;
             } else if (kv_offload_mode < 0) {
                 if (prop.totalGlobalMem <= (13ull << 30)) {
-                    kv_dtype_ = KvDtype::FP8_E4M3;
+                    kv_dtype_ = KvDtype::K8V8;
                 } else if (sm_cc >= 89 && opts.max_ctx > 16384 && prop.totalGlobalMem < (40ull << 30)) {
-                    kv_dtype_ = KvDtype::FP8_E4M3;
+                    kv_dtype_ = KvDtype::K8V8;
                 }
             }
         }
@@ -1063,6 +1076,9 @@ public:
         int* out_drafted,
         std::string& /*err*/) override {
         if (!initialized_ || model_.ls_active || !dspark_ || !dspark_->ready || slot != 0 || dspark_slot_ != 0) return 0;
+        // Past draft_max_ctx the drafter's window no longer pays for itself (measured: +12% at 60K, -15% at 131K), so the
+        // step emits one plain token: returning 0 is the same path as "no drafter", which the serve loop already handles.
+        if (spec_cfg_.max_ctx > 0 && anchor_pos >= spec_cfg_.max_ctx) return 0;
         if (anchor_pos <= 0 || anchor_pos + 12 >= eff_max_ctx_ || anchor_pos + 12 >= dspark_->max_ctx || max_emit < 1 || !out_emitted) return 0;
         if (!runner_->ensure_global_kv_cap(anchor_pos + 12) || !dspark_->ensure_ctx_cap(anchor_pos + 12)) return 0;
 
@@ -1072,7 +1088,10 @@ public:
 
         // 2. True W=4 Multi-Branch Sparse-MoE Bayes-Optimal Adaptive Beam Tree (M* in {3,4,5,6,8,10,12})!
         strata::ink::InkTreeSpec tr{};
-        const int max_nodes = std::min(12, runner_->tree_cap);
+        // The window narrows with depth when --draft-nodes-deep is set: a deep step's expert union costs more than the
+        // extra accepted tokens are worth (served at a 65K prompt: 57.3 tok/s with two nodes against 54.6 with four).
+        const int nodes_here = (spec_cfg_.nodes_deep > 0 && anchor_pos >= spec_cfg_.nodes_switch) ? spec_cfg_.nodes_deep : spec_cfg_.nodes;
+        const int max_nodes = std::min(nodes_here, runner_->tree_cap);
         dspark_->draft_beam_tree(anchor_tok, anchor_pos, spec_cfg_.beam, max_nodes, tr, spec_cfg_.cost, spec_cfg_.plain);
 
         // 3. Single CUDA-Graph 48-visit tree verify + exact GPU screened argmax (ZERO 6.4 MB logits D2H!)
@@ -1203,7 +1222,7 @@ private:
     int max_slots_ = 1;
     int eff_max_ctx_ = 4096;
     // The drafter's window shape: --draft-beam / --draft-cost / --draft-plain (or STRATA_INK_SPEC_BEAM / _COST / _PLAIN), STRATA_INK_SPEC_LOG=1 prints stats
-    struct SpecCfg { int beam = 4; float cost = 4.2f; float plain = 0.0f; bool log = false; } spec_cfg_;
+    struct SpecCfg { int beam = 4; int nodes = 12; int nodes_deep = 0; int nodes_switch = 40960; int max_ctx = -1; float cost = 4.2f; float plain = 0.0f; bool log = false; } spec_cfg_;
     bool kv_grow_failed_ = false;    // the last forward_batch ended only because the global K/V could not grow
     int eff_chunk_run_ = 0;          // the prefill chunk the runner really got (after auto / halve-on-fail)
     int dspark_slot_ = -1;

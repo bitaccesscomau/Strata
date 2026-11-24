@@ -267,6 +267,7 @@ struct InkCudaModel {
     // Exact 2-stage unembed screening index (for BF16 unembed in SQ-20)
     UnembedScreenIndex unembed_screen;
 
+
     const uint8_t* trunk_ptr(const std::string& name) const {
         return d_trunk + man.get(name).off;
     }
@@ -1955,12 +1956,15 @@ struct InkCudaRunner {
     void prof_reset() { for (double& x : prof_ms) x = 0.0; }
     void prof_print(const char* tag, int iters) const {
         double tot = 0; for (double x : prof_ms) tot += x;
-        std::fprintf(stderr, "[PROF %s / %d iters] total=%.2f ms/step | res_ctrl=%.2f dense_qkv=%.2f sconv_kv=%.2f attn=%.2f dense_wo=%.2f moe=%.2f unembed=%.2f\n",
+        // Every bucket is printed so the line adds up to total=: bucket 6 is whatever the marks leave unclaimed, and
+        // 8..13 are the MoE sub-phases (router, bin, gate/up, down, the two GGUF variants) recorded by the MoE hook.
+        std::fprintf(stderr, "[PROF %s / %d iters] total=%.2f ms/step | res_ctrl=%.2f dense_qkv=%.2f sconv_kv=%.2f attn=%.2f dense_wo=%.2f moe=%.2f other=%.2f unembed=%.2f\n",
                     tag, iters, tot / iters,
                     prof_ms[0] / iters, prof_ms[1] / iters, prof_ms[2] / iters, prof_ms[3] / iters,
-                    prof_ms[4] / iters, prof_ms[5] / iters, prof_ms[7] / iters);
-        std::fprintf(stderr, "[PROF moe parts / %d iters] (the moe= above is what is left after these) router+topk=%.2f bin=%.2f gu(sf4/mx8/sk)=%.2f dn(sf4/mx8/sk)=%.2f gu(gguf)=%.2f dn(gguf)=%.2f ms/step\n",
-                    iters, prof_ms[8] / iters, prof_ms[9] / iters, prof_ms[10] / iters, prof_ms[11] / iters, prof_ms[12] / iters, prof_ms[13] / iters);
+                    prof_ms[4] / iters, prof_ms[5] / iters, prof_ms[6] / iters, prof_ms[7] / iters);
+        std::fprintf(stderr, "[PROF %s parts / %d iters] moe_router=%.2f bin=%.2f gu=%.2f dn=%.2f gu_gguf=%.2f dn_gguf=%.2f b14=%.2f b15=%.2f ms/step\n",
+                    tag, iters, prof_ms[8] / iters, prof_ms[9] / iters, prof_ms[10] / iters, prof_ms[11] / iters,
+                    prof_ms[12] / iters, prof_ms[13] / iters, prof_ms[14] / iters, prof_ms[15] / iters);
     }
 
     static size_t kv_bytes_per_visit_pos(InkKvDtype dt) noexcept {
