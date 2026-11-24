@@ -61,3 +61,58 @@ slower than one card (about 2,500 and 85-99), so there is no two-card win for th
 | prefill attention in fixed 1792-token blocks with a bounded resident block set | the prefill path's MoE stops re-reading evicted expert bodies per chunk; combined with upstream's own prefill work it is the 2x prefill measured above |
 | a check that every layer's K/V row is whole blocks | unchanged tensors on every existing path; the block kernel assumes it |
 | `--kv auto` / `--parallel` | `auto` = fp8 whenever the card has 16 GB or more, fp16 otherwise; `--parallel` sets the slot count |
+
+## Hill-climb: KV dtype, chunk, speculation shape (2026-11-25)
+
+Method: `inference-optimisation` skill. Served path (`--serve`), 64K context unless said, one RTX 3090, 6 cells a run
+(1K/30K/64K, greedy and sampled), interleaved controls, medians of repeated runs, a needle gate before promoting.
+Ceilings in the bench kit's `THEORY.md`; every run in `~/ink-r24/results/ledger.jsonl`.
+
+### KV dtype, 64K context, chunk 2048, five interleaved runs (tok/s)
+
+| dtype | 1K greedy | 1K sampled | 30K greedy | 30K sampled | 64K greedy | 64K sampled |
+|---|---:|---:|---:|---:|---:|---:|
+| fp8 (E4M3) | 92.8-93.6 | 78.2-79.1 | 60.1-60.9 | 50.7-51.3 | 44.1-44.3 | 38.7-38.9 |
+| **k8v8** | **95.8-96.3** | 71.9-72.2 | **64.7-64.9** | **61.4-61.6** | **52.4-52.6** | 41.4-41.5 |
+| fp16 | 94.9 | **85.1** | 64.1 | 61.0 | 46.7 | **42.7** |
+
+FP8_E4M3 — what `--kv auto` used to pick when memory was tight — is the slowest in every cell, at the same bytes per
+element. K8V8 takes the short-context sampled cell badly (−15% against fp16, because the dequant is not amortised at a
+1K sequence) and wins at depth (+12% at 64K greedy against fp16, +20% against fp8 at 30K sampled). FP16 cannot hold
+256K on a 24 GB card, so the served 256K entry uses K8V8, and `--kv auto` now takes K8V8 in the branches that used to
+take FP8 (verified: 16 slots at 8K selects `kv=k8v8`, 275.1 against 264.3 tok/s aggregate for explicit fp8).
+
+### A needle at the end of the window
+
+| config | context | result |
+|---|---|---|
+| k8v8 | 261,888 tokens | passphrase **found** (read 744.7 tok/s, decode 29.1, first token 352 s) |
+| k8v4 | 65,280 tokens | **found** (decode 64.9 against fp16's 58.2) |
+| fp16 | 65,280 tokens | **found** |
+
+### Prefill chunk (30K prompt, prefill only)
+
+| chunk | prefill |
+|---:|---:|
+| 1024 | 1,816.5 tok/s |
+| **2048** | **1,919.8 tok/s** (+5.7%) |
+| 4096 | 1,932.1 tok/s (+6.4%) |
+
+2048 is the pick: nearly all of 4096's gain without a larger decode stall for a second chat.
+
+### Speculation shape: rejected
+
+`--draft-beam 1` (one linear chain) beat the default beam of 4 by 3.4-3.7% at 32K context, and again 3.1-3.6% in the
+promotion window — but at 64K context it **regressed** 1K greedy by 7.4% and 30K sampled by 10.6% against both
+controls. A win that does not hold across contexts is not promoted; the default stays.
+
+### Dual card: rejected twice
+
+Expert parallel (`--gpus 2`) measured 2,133.7 tok/s prefill and 55.8 tok/s decode; the layer split (`--gpus 2
+--layer-split auto`, and `24,24`) 2,102.8-2,107.9 tok/s and 54.7-56.3 tok/s. One card does ~2,500 and 85-99. With no
+peer-to-peer link the pipeline's transfers and serialisation cost more than the second card's bandwidth adds.
+
+### Parallel chats, 32K, chunk 2048
+
+Aggregate decode 82.6 / 93.6 / 149.1 / 220.1 tok/s at 1 / 2 / 4 / 8 slots; prefill 2,449 → 2,332. At 256K the card has
+9,719 MiB free and a K8V8 slot's K/V wants 4.1 GB, so two slots fit and four do not.
