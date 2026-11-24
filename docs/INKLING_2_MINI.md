@@ -233,3 +233,26 @@ but changed nothing on SQ-15, because the sf4/mx8 gate already selects the tile 
 build reproduced the numbers (1,978.5/1,905.0 on, 1,154.9/1,129.5 off), so the change was reverted.
 
 With the tile on, a prefill chunk is 56% MoE on the int8/dp4a expert kernels: the next win there is expert-GEMM work.
+
+## Seventh campaign: drafting stops paying at ~100K (2026-11-25)
+
+The DSpark drafter's own window stops paying once the conversation is long. Measured on one card at the 256K entry's
+shape, four nodes, two runs a cell:
+
+| prompt | drafts on | drafts off | |
+|---|---:|---:|---|
+| 60K | 53.9 / 53.5 | 47.7 / 47.6 | drafting pays **+12.5%** |
+| 90K | 43.4 | 43.1 | tie |
+| 110K | 38.0 | **41.1** | drafting costs 8% |
+| 131K | 33.5-33.6 | **38.4** | drafting costs **15%** |
+
+`--draft-adapt` (the per-request governor) does not catch it: 33.4-33.5 at 131K, still drafting. The engine gained
+`--draft-max-ctx N` (`STRATA_INK_DRAFT_MAX_CTX`); above that position the step takes the plain-token path. With 100,000:
+
+| | drafts on, no cutoff | cutoff 100K |
+|---|---:|---:|
+| 131K prompt | 33.4-33.5 tok/s | **37.7-37.8 tok/s (+12.8%)** |
+| 60K prompt | 53.5 | 53.5 (untouched) |
+
+Both served entries carry it; through the router a 118,210-token prompt answers correctly with prefill 1,234 tok/s and
+decode 50.4 tok/s.
