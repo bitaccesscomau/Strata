@@ -1320,7 +1320,9 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
 
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(pinned_shared_test src/core/pinned_shared_test.cpp)
-    target_link_libraries(pinned_shared_test PRIVATE strata_core ${_strata_gpu_runtime_target})
+    # (v0.2.21: pinned.cu in strata_core reads the CPU expert layout, so the test needs the kernels' CPU half too;
+    #  the engine binary links it already - without this the whole test build stops at this link)
+    target_link_libraries(pinned_shared_test PRIVATE strata_core strata_kernels_cpu ${_strata_gpu_runtime_target})
     add_test(NAME pinned_shared_test COMMAND pinned_shared_test)
   endif()
   if(WIN32)   # the replicas' shared expert arena as a named section (src/core/pinned.cu): two arenas, a child process, the last handle
