@@ -116,3 +116,28 @@ peer-to-peer link the pipeline's transfers and serialisation cost more than the 
 
 Aggregate decode 82.6 / 93.6 / 149.1 / 220.1 tok/s at 1 / 2 / 4 / 8 slots; prefill 2,449 → 2,332. At 256K the card has
 9,719 MiB free and a K8V8 slot's K/V wants 4.1 GB, so two slots fit and four do not.
+
+## Second campaign: the head, prefix reuse, and the 2-slot gate (2026-11-25)
+
+The decode step's phase profile names `unembed+softcap` at 15-17 ms a batch, but that interval is measured across a
+stream synchronisation: it covers the whole queued 48-visit step, not the head. An isolated microbenchmark
+(`cuda/head_bench.cu`, medians of 30 with a parity check) puts the head where it belongs:
+
+| rows M | old launch (25,008 CTAs) | persistent grid (656 CTAs) | bytes/s |
+|---:|---:|---:|---:|
+| 1 | **1.098 ms** | 1.149 ms | 840 GB/s |
+| 5 | **1.891 ms** | 2.417 ms | 487 GB/s |
+| 12 | **5.514 ms** | 6.101 ms | 167 GB/s |
+
+At M=1 the head already reads its 922 MB at 840 GB/s, which is this card's measured copy bandwidth, and the persistent
+variants were 4-22% slower at every M (bit-identical output, 0 of 2,400,696 values differ). The change was reverted:
+the head is not a lever. With the head out of the budget, a step at M=5 reads about 9-10 GB (dense 2.07 GB, the expert
+union near 7 GB, the head 0.92 GB), a floor near 12 ms against a measured 15-17 ms — **the step is at roughly 75% of
+its memory floor**, and everything left is fewer bytes per accepted token, which is drafter work.
+
+Two gates came out clean this round:
+
+- **Multi-turn prefix reuse works.** A 6,030-token document answered, then a follow-up: `RESUME 6330` of an expected
+  6,330 tokens, first token 2.908 s → **0.092 s**.
+- **Two slots at 256K pass.** Two concurrent 100,055- and 100,054-token requests with passphrases at 85 % depth both
+  answered exactly (wall 173.5 s, 256K, k8v8, chunk 2048). The served entry now runs `--parallel 2`.
