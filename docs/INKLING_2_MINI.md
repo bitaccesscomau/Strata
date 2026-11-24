@@ -270,3 +270,14 @@ A six-slot soak passes (six concurrent 20K-token requests, six of six passphrase
 **132.0 tok/s aggregate at 22.0 a stream** against four slots' 122.2 at 30.5 - +8% aggregate for -28% per stream - so
 the entry keeps four slots. Eight full-depth slots would not fit VRAM either (8 x 1.05 GB of 64K K/V, 2.4 GB of
 workspace and 14 GB of weights against 24 GB).
+
+## Where the engine stands (after nine campaigns)
+
+Served, one RTX 3090, through the router: 3.3K prompt 120.6 tok/s decode and 2,406 tok/s prefill; 19K 96.2; 118K plain
+50.4 at 1,234 tok/s prefill; four concurrent 64K chats 122.2 aggregate; two 256K slots; head GEMV at 840 GB/s (the
+card's copy bandwidth); a 261,888-token needle found.
+
+Three rounds of levers then landed inside noise (eight-wide S_K dequant, S_K 64-row tile, six slots), and the KV re-test
+under the draft cutoff tied (k8v4 +0.5% at 131K with plain tokens), so the configuration is settled. What remains is
+kernel work: the expert GEMM at prefill (56% of a chunk at ~14% of the int8 tensor cores) and the M=1 expert GEMV at
+depth (3x above its byte floor), then drafter acceptance. See the bench kit's `PLAN.md` STATUS for the ranked list.
