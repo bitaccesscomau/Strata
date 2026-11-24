@@ -119,6 +119,10 @@ public:
         if (const char* e = std::getenv("STRATA_INK_SPEC_NODES")) spec_cfg_.nodes = std::atoi(e);
         if (const char* e = std::getenv("STRATA_INK_DRAFT_MAX_CTX")) spec_cfg_.max_ctx = std::atoi(e);
         if (opts.draft_max_ctx >= 0) spec_cfg_.max_ctx = opts.draft_max_ctx;
+        if (const char* e = std::getenv("STRATA_INK_SPEC_NODES_DEEP")) spec_cfg_.nodes_deep = std::atoi(e);
+        if (const char* e = std::getenv("STRATA_INK_SPEC_NODES_SWITCH")) spec_cfg_.nodes_switch = std::atoi(e);
+        if (opts.spec_nodes_deep > 0) spec_cfg_.nodes_deep = opts.spec_nodes_deep;
+        if (opts.spec_nodes_switch > 0) spec_cfg_.nodes_switch = opts.spec_nodes_switch;
         if (const char* e = std::getenv("STRATA_INK_SPEC_COST")) spec_cfg_.cost = (float)std::atof(e);
         if (const char* e = std::getenv("STRATA_INK_SPEC_PLAIN")) spec_cfg_.plain = (float)std::atof(e);
         if (opts.spec_beam > 0) spec_cfg_.beam = opts.spec_beam;
@@ -1084,7 +1088,10 @@ public:
 
         // 2. True W=4 Multi-Branch Sparse-MoE Bayes-Optimal Adaptive Beam Tree (M* in {3,4,5,6,8,10,12})!
         strata::ink::InkTreeSpec tr{};
-        const int max_nodes = std::min(spec_cfg_.nodes, runner_->tree_cap);
+        // The window narrows with depth when --draft-nodes-deep is set: a deep step's expert union costs more than the
+        // extra accepted tokens are worth (served at a 65K prompt: 57.3 tok/s with two nodes against 54.6 with four).
+        const int nodes_here = (spec_cfg_.nodes_deep > 0 && anchor_pos >= spec_cfg_.nodes_switch) ? spec_cfg_.nodes_deep : spec_cfg_.nodes;
+        const int max_nodes = std::min(nodes_here, runner_->tree_cap);
         dspark_->draft_beam_tree(anchor_tok, anchor_pos, spec_cfg_.beam, max_nodes, tr, spec_cfg_.cost, spec_cfg_.plain);
 
         // 3. Single CUDA-Graph 48-visit tree verify + exact GPU screened argmax (ZERO 6.4 MB logits D2H!)
@@ -1215,7 +1222,7 @@ private:
     int max_slots_ = 1;
     int eff_max_ctx_ = 4096;
     // The drafter's window shape: --draft-beam / --draft-cost / --draft-plain (or STRATA_INK_SPEC_BEAM / _COST / _PLAIN), STRATA_INK_SPEC_LOG=1 prints stats
-    struct SpecCfg { int beam = 4; int nodes = 12; int max_ctx = -1; float cost = 4.2f; float plain = 0.0f; bool log = false; } spec_cfg_;
+    struct SpecCfg { int beam = 4; int nodes = 12; int nodes_deep = 0; int nodes_switch = 40960; int max_ctx = -1; float cost = 4.2f; float plain = 0.0f; bool log = false; } spec_cfg_;
     bool kv_grow_failed_ = false;    // the last forward_batch ended only because the global K/V could not grow
     int eff_chunk_run_ = 0;          // the prefill chunk the runner really got (after auto / halve-on-fail)
     int dspark_slot_ = -1;

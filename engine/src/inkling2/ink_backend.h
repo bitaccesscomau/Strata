@@ -35,6 +35,11 @@ struct BackendOpts {
     std::string kv_offload = "auto"; // "auto" | "on" | "off" (zero-copy mapped pinned host global KV spill)
     bool enable_dspark = true;
     int spec_beam = -1;          // --draft-beam N: 1 = one linear chain (the block drafter), 4 = the beam tree (default); < 0 = STRATA_INK_SPEC_BEAM or 4
+    int spec_nodes_deep = -1;    // --draft-nodes-deep N: verify-window size at or above spec_nodes_switch (default 0 = same as
+                                 // --draft-nodes). Measured served at a 65K prompt: two nodes read 57.3 tok/s against four's
+                                 // 54.6 (+5.0%), while at a 1K prompt four reads 107.4 against two's 103.8. So the window
+                                 // narrows with depth, where a step's expert union costs more than its accepted tokens.
+    int spec_nodes_switch = -1;  // --draft-nodes-switch POS: the position where the deep window starts (default 40960)
     int draft_max_ctx = -1;      // --draft-max-ctx N (STRATA_INK_DRAFT_MAX_CTX): above this position a step skips drafting and
                                  // emits one plain token. Measured on one RTX 3090 with SQ-15: drafting pays up to ~90K
                                  // (60K: 53.7 against 47.7) and costs from ~110K (131K: 33.5 against 38.4), so 100000 is the
