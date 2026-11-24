@@ -302,3 +302,19 @@ Run on the exact served argv, at 256K and at 32K:
 lengths each time), so it is the engine's chunk-order arithmetic and not this work. Both served entries use one chunk
 (2048), so it does not reach production. The pinned recipe, with the engine sha, the weights revision, both launch lines
 and the gate artefacts, is in the bench kit's `best-config.json`.
+
+## Eleventh campaign: the window narrows with depth (2026-11-25)
+
+The verify window's best size shifts with position. Served, at a 65K context window:
+
+| cell | four nodes | two nodes |
+|---|---:|---:|
+| 1K greedy / sampled | 108.7 / 72.7 | 103.9 / 72.0 |
+| 30K greedy / sampled | 74.2 / 62.4 | 73.4 / 61.4 |
+| **65K greedy** | 54.9 / 54.5 | **57.3 / 57.3** |
+| 65K sampled | 41.7 | 41.4 |
+
+Two nodes read +5.0% at 65K and cost 4.0% at 1K greedy, so the engine gained `--draft-nodes-deep N` with
+`--draft-nodes-switch POS` (default 40,960): four nodes below the switch, two above. Verified served against a flat
+four, every other cell inside 0.7%; both entries carry it. The bench disagrees at 1K (it prefers six nodes), which is
+the fourth time it has flattered a configuration the served path does not deliver.
