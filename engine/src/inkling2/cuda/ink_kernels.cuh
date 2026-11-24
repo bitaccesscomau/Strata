@@ -1892,10 +1892,12 @@ __global__ void __launch_bounds__(256) k_ink_sk_to_bf16_v8(const uint8_t* __rest
             out[k] = *reinterpret_cast<const uint32_t*>(&ab);
         }
     } else {
-        const uint32_t lo4 = *reinterpret_cast<const uint32_t*>(pl + (idx >> 1));
-        uint32_t hi;
-        if constexpr (FMT == FMT_S5_K) hi = *reinterpret_cast<const uint16_t*>(pl + 128 + (idx >> 3));
-        else                           hi = *reinterpret_cast<const uint16_t*>(pl + 128 + (idx >> 2));
+        // The superblock is 262 bytes (6 + 128 + 128) with no alignment guarantee, so the two plane groups are read
+        // byte by byte and assembled; a uint32 load here faults with CUDA error 716 on every other row.
+        const uint8_t* lo_p = pl + (idx >> 1);
+        const uint32_t lo4 = (uint32_t)lo_p[0] | ((uint32_t)lo_p[1] << 8) | ((uint32_t)lo_p[2] << 16) | ((uint32_t)lo_p[3] << 24);
+        const uint8_t* hi_p = pl + 128 + (idx >> (FMT == FMT_S5_K ? 3 : 2));
+        uint32_t hi = (uint32_t)hi_p[0] | ((uint32_t)hi_p[1] << 8);
         #pragma unroll
         for (int k = 0; k < 4; ++k) {
             const int e0 = 2 * k, e1 = 2 * k + 1;
