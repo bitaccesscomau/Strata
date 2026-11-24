@@ -1863,6 +1863,55 @@ __global__ void __launch_bounds__(256) k_ink_sk_to_bf16(const uint8_t* __restric
     dst[(size_t)row * K + col] = __float2bfloat16_rn(v);
 }
 
+// Vectorised S_K -> BF16: 8 elements a thread. The scalar k_ink_sk_to_bf16 above is one element a thread with about 15
+// instructions each (two dependent byte loads, shifts, a float subtract and a convert); measured 16.5 ms for the 200K-row
+// head's 460 M elements, an instruction rate rather than a bandwidth one. Eight consecutive elements share a 4-byte low
+// plane group and a 2-byte high plane group, so one load pair feeds eight converts and one 16-byte store.
+// Same arithmetic, same rounding as the scalar kernel: the values it writes are bit-identical.
+template <int FMT>
+__global__ void __launch_bounds__(256) k_ink_sk_to_bf16_v8(const uint8_t* __restrict__ raw, __nv_bfloat16* __restrict__ dst,
+                                                           int N, int K) {
+    const int row = blockIdx.y;
+    const int col = (blockIdx.x * 256 + threadIdx.x) * 8;
+    if (row >= N || col >= K) return;
+    constexpr int SB = ink_sb_bytes(FMT);
+    constexpr float HALF = ink_sk_half(FMT);
+    const int nsb = K >> 8;
+    const int s = col >> 8;
+    const int idx = col & 255;          // 8-aligned, so the eight stay inside one 64-element group
+    const int g = idx >> 6;
+    const uint8_t* blk = raw + ((size_t)row * nsb + s) * SB;
+    const float eff = f16_to_f32(ld16_u(blk)) * ((float)blk[2 + g] * (1.0f / 255.0f));
+    const uint8_t* pl = blk + 6;
+    uint32_t out[4];
+    if constexpr (FMT == FMT_S8_K) {
+        const int8_t* q = reinterpret_cast<const int8_t*>(pl) + idx;
+        for (int k = 0; k < 4; ++k) {
+            const float a = (float)q[2 * k] * eff, b = (float)q[2 * k + 1] * eff;
+            const __nv_bfloat162 ab = __floats2bfloat162_rn(a, b);
+            out[k] = *reinterpret_cast<const uint32_t*>(&ab);
+        }
+    } else {
+        const uint32_t lo4 = *reinterpret_cast<const uint32_t*>(pl + (idx >> 1));
+        uint32_t hi;
+        if constexpr (FMT == FMT_S5_K) hi = *reinterpret_cast<const uint16_t*>(pl + 128 + (idx >> 3));
+        else                           hi = *reinterpret_cast<const uint16_t*>(pl + 128 + (idx >> 2));
+        #pragma unroll
+        for (int k = 0; k < 4; ++k) {
+            const int e0 = 2 * k, e1 = 2 * k + 1;
+            const uint32_t l0 = (lo4 >> (4 * e0)) & 0x0Fu, l1 = (lo4 >> (4 * e1)) & 0x0Fu;
+            uint32_t h0, h1;
+            if constexpr (FMT == FMT_S5_K) { h0 = (hi >> e0) & 1u; h1 = (hi >> e1) & 1u; }
+            else                           { h0 = (hi >> (2 * e0)) & 3u; h1 = (hi >> (2 * e1)) & 3u; }
+            const float a = ((float)(l0 | (h0 << 4)) - HALF) * eff;
+            const float b = ((float)(l1 | (h1 << 4)) - HALF) * eff;
+            const __nv_bfloat162 ab = __floats2bfloat162_rn(a, b);
+            out[k] = *reinterpret_cast<const uint32_t*>(&ab);
+        }
+    }
+    *reinterpret_cast<uint4*>(dst + (size_t)row * K + col) = *reinterpret_cast<const uint4*>(out);
+}
+
 // ============================================================================
 // 7. Exact 2-Stage Cauchy-Schwarz Screened Unembed (0.25 ms on RTX 5090, 100.000% Bit-Exact Argmax!)
 //    Coarse plane: symmetric INT8 per-row quantized unembed [V, 2304] (460 MB) + per-row scale sc[V] + exact L2 error eps[V]!

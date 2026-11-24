@@ -267,10 +267,6 @@ struct InkCudaModel {
     // Exact 2-stage unembed screening index (for BF16 unembed in SQ-20)
     UnembedScreenIndex unembed_screen;
 
-    // One BF16 copy of a quantised unembed, built once when VRAM allows. Without it every head call dequantises the
-    // whole 207 MB head before its GEMM: measured 15-17 ms of every serve step at M ~ 5 (STRATA_INK_PROF host), against
-    // a GEMV at this shape that should read 207 MB in ~0.25 ms.
-    __nv_bfloat16* d_unembed_bf16 = nullptr;
 
     const uint8_t* trunk_ptr(const std::string& name) const {
         return d_trunk + man.get(name).off;
@@ -713,40 +709,6 @@ struct InkCudaModel {
                 INK_CK(cudaDeviceSynchronize());
                 unembed_screen.ready = true;
             }
-        }
-
-        // 4b. Keep one BF16 copy of a quantised head when there is room (see d_unembed_bf16): the fallback in linear()
-        // dequantises the whole head per call. Skip when VRAM is tight; the per-call path stays correct either way.
-        if (ui.fmt != FMT_BF16 && (ui.fmt == FMT_S5_K || ui.fmt == FMT_S6_K || ui.fmt == FMT_S8_K)) {
-            const int V = man.c.vocab_unpadded;
-            const size_t need = (size_t)V * kInkHidden * sizeof(__nv_bfloat16);
-            INK_CK(ink_cuda_mem_info(&vfree, &vtot));
-            __nv_bfloat16* w_tile = nullptr;
-            cudaStream_t deq_st = nullptr;   // the model is built before the runner's stream exists: own stream, freed below
-            cudaStreamCreateWithFlags(&deq_st, cudaStreamNonBlocking);
-            if (vfree > need + (4096ull << 20) && cudaMalloc(&d_unembed_bf16, need) == cudaSuccess) {
-                const int tile_n = (int)kInkDsparkInter;
-                if (cudaMalloc(&w_tile, (size_t)tile_n * kInkHidden * sizeof(__nv_bfloat16)) == cudaSuccess) {
-                    const size_t row_b = (size_t)(kInkHidden / 256) * ink_sb_bytes(ui.fmt);
-                    for (int n0 = 0; n0 < V; n0 += tile_n) {
-                        const int nt = std::min(tile_n, V - n0);
-                        dim3 dg((kInkHidden + 255) / 256, nt);
-                        const uint8_t* Wsub = d_trunk + ui.off + (size_t)n0 * row_b;
-                        if (ui.fmt == FMT_S5_K)      k_ink_sk_to_bf16<FMT_S5_K><<<dg, 256, 0, deq_st>>>(Wsub, w_tile, nt, kInkHidden);
-                        else if (ui.fmt == FMT_S6_K) k_ink_sk_to_bf16<FMT_S6_K><<<dg, 256, 0, deq_st>>>(Wsub, w_tile, nt, kInkHidden);
-                        else                         k_ink_sk_to_bf16<FMT_S8_K><<<dg, 256, 0, deq_st>>>(Wsub, w_tile, nt, kInkHidden);
-                        INK_CK(cudaMemcpyAsync(d_unembed_bf16 + (size_t)n0 * kInkHidden, w_tile,
-                                               (size_t)nt * kInkHidden * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice, deq_st));
-                    }
-                    INK_CK(cudaStreamSynchronize(deq_st));
-                } else {
-                    cudaGetLastError();
-                    cudaFree(d_unembed_bf16);
-                    d_unembed_bf16 = nullptr;
-                }
-                if (w_tile) { cudaFree(w_tile); w_tile = nullptr; }
-            }
-            cudaStreamDestroy(deq_st);
         }
 
         std::fprintf(stderr, "[InkCUDA] Loaded %s (%s): trunk=%.2f GB (%.2fs), experts=%zu VRAM / %zu host (%.2fs, hyb=%d, promo=%d, pf_buf=%.0fMB), sm120_tc=%d, screen=%d\n",
@@ -1739,7 +1701,6 @@ struct InkCudaModel {
     }
 
     void free_all() {
-        if (d_unembed_bf16) { cudaFree(d_unembed_bf16); d_unembed_bf16 = nullptr; }
         if (ep2_active && peer_gpu >= 0) {
             cudaSetDevice(peer_gpu);
             for (int il = 0; il < 24; ++il) {
@@ -3132,9 +3093,10 @@ struct InkCudaRunner {
                 const int nt = std::min(tile_n, N - n0);
                 dim3 dg((K + 255) / 256, nt);
                 const uint8_t* Wsub = W + (size_t)n0 * row_b;
-                if (ti.fmt == FMT_S5_K)      k_ink_sk_to_bf16<FMT_S5_K><<<dg, 256, 0, st>>>(Wsub, w_dst, nt, K);
-                else if (ti.fmt == FMT_S6_K) k_ink_sk_to_bf16<FMT_S6_K><<<dg, 256, 0, st>>>(Wsub, w_dst, nt, K);
-                else                         k_ink_sk_to_bf16<FMT_S8_K><<<dg, 256, 0, st>>>(Wsub, w_dst, nt, K);
+                dim3 dg8(((K / 8) + 255) / 256, nt);
+                if (ti.fmt == FMT_S5_K)      k_ink_sk_to_bf16_v8<FMT_S5_K><<<dg8, 256, 0, st>>>(Wsub, w_dst, nt, K);
+                else if (ti.fmt == FMT_S6_K) k_ink_sk_to_bf16_v8<FMT_S6_K><<<dg8, 256, 0, st>>>(Wsub, w_dst, nt, K);
+                else                         k_ink_sk_to_bf16_v8<FMT_S8_K><<<dg8, 256, 0, st>>>(Wsub, w_dst, nt, K);
                 gemm_bf16_compat(w_dst, X, Y + n0, M, nt, K, N, (n0 > 0) || reuse_x_bf16, true);
             }
         }
