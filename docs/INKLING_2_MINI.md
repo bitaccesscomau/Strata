@@ -187,3 +187,31 @@ free against 5,759, less than one 256K slot's K/V. 2048 stays.
 Four slots at 64K are now a served entry of their own (`strata/inkling-2-mini-sq-15-64k`, `--parallel 4`): four
 concurrent 60K-token requests with passphrases at 85% depth all answered, and through the router four concurrent 1K
 generations ran **122.2 tok/s aggregate** (30.5 a stream) against 112.6 for one chat alone.
+
+## Fifth campaign: where prefill time actually goes (2026-11-25)
+
+`STRATA_INK_PROF=2` was printing only seven of sixteen phase buckets, so 38% of every prefill chunk looked
+unattributed. With all buckets printed, one 2,048-token chunk at 23K context reads:
+
+| phase | ms / chunk | share |
+|---|---:|---:|
+| MoE gate/up | 287 | 24% |
+| MoE down | 138 | 12% |
+| MoE remainder (bin/gather/scatter) | 225 | 19% |
+| MoE router + top-k | 13 | 1% |
+| **MoE total** | **663** | **56%** |
+| attention | 165 | 14% |
+| dense qkv | 146 | 12% |
+| residual / control / norms | 117 | 10% |
+| dense wo | 39 | 3% |
+| unembed | 24 | 2% |
+| short-conv + KV | 26 | 2% |
+
+Prefill is MoE-bound, and the MoE path is the already-vectorised int8/dp4a one (`sk_unpack8_lane8`, unpack-once per
+row): the next win there is expert-GEMM kernel work, not a flag. `STRATA_INK_MOE_V1=1` measured neutral (1,910-1,926
+against 1,921-1,954 tok/s). An eight-wide S_K→BF16 dequant was written and made bit-correct (the first version faulted
+with CUDA 716 because a 262-byte superblock gives no alignment guarantee) and measured no change, because the dense
+linears are BF16 on SQ-15; it is reverted and the negative is recorded.
+
+The four-slot 64K entry also passed a sustained soak this round: four 30,000-token requests with passphrases at 85%
+depth, 93 s, four of four found.
