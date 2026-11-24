@@ -18,7 +18,10 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   # The selected runtime is PUBLIC because graph.cpp is a HOST translation unit that calls cudaGraphLaunch and
   # cudaEventQuery: the .cu sources get cudart through the CUDA language rules, a .cpp does not, and the
   # linker error ("unresolved external symbol cudaGraphInstantiate") names the function rather than the cause.
-  target_link_libraries(strata_core PUBLIC strata_plan strata_warnings ${_strata_gpu_runtime_target} ${CMAKE_DL_LIBS})
+  # pinned.cu (in this library) reads strata::kernels::cpu::expert_layout(), so the CPU expert kernels are part of
+  # this library's interface: the engine binary linked them already, the tools and some tests did not and their
+  # links stopped on it in v0.2.21.
+  target_link_libraries(strata_core PUBLIC strata_plan strata_warnings strata_kernels_cpu ${_strata_gpu_runtime_target} ${CMAKE_DL_LIBS})
 
   add_executable(strata-device src/core/device_main.cpp)
   target_link_libraries(strata-device PRIVATE strata_core)
@@ -1320,9 +1323,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
 
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(pinned_shared_test src/core/pinned_shared_test.cpp)
-    # (v0.2.21: pinned.cu in strata_core reads the CPU expert layout, so the test needs the kernels' CPU half too;
-    #  the engine binary links it already - without this the whole test build stops at this link)
-    target_link_libraries(pinned_shared_test PRIVATE strata_core strata_kernels_cpu ${_strata_gpu_runtime_target})
+    target_link_libraries(pinned_shared_test PRIVATE strata_core ${_strata_gpu_runtime_target})
     add_test(NAME pinned_shared_test COMMAND pinned_shared_test)
   endif()
   if(WIN32)   # the replicas' shared expert arena as a named section (src/core/pinned.cu): two arenas, a child process, the last handle
