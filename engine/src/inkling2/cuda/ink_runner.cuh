@@ -3075,10 +3075,9 @@ struct InkCudaRunner {
                 const int nt = std::min(tile_n, N - n0);
                 dim3 dg((K + 255) / 256, nt);
                 const uint8_t* Wsub = W + (size_t)n0 * row_b;
-                dim3 dg8(((K / 8) + 255) / 256, nt);
-                if (ti.fmt == FMT_S5_K)      k_ink_sk_to_bf16_v8<FMT_S5_K><<<dg8, 256, 0, st>>>(Wsub, w_dst, nt, K);
-                else if (ti.fmt == FMT_S6_K) k_ink_sk_to_bf16_v8<FMT_S6_K><<<dg8, 256, 0, st>>>(Wsub, w_dst, nt, K);
-                else                         k_ink_sk_to_bf16_v8<FMT_S8_K><<<dg8, 256, 0, st>>>(Wsub, w_dst, nt, K);
+                if (ti.fmt == FMT_S5_K)      k_ink_sk_to_bf16<FMT_S5_K><<<dg, 256, 0, st>>>(Wsub, w_dst, nt, K);
+                else if (ti.fmt == FMT_S6_K) k_ink_sk_to_bf16<FMT_S6_K><<<dg, 256, 0, st>>>(Wsub, w_dst, nt, K);
+                else                         k_ink_sk_to_bf16<FMT_S8_K><<<dg, 256, 0, st>>>(Wsub, w_dst, nt, K);
                 gemm_bf16_compat(w_dst, X, Y + n0, M, nt, K, N, (n0 > 0) || reuse_x_bf16, true);
             }
         }
