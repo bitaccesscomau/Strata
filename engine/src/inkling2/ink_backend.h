@@ -35,6 +35,9 @@ struct BackendOpts {
     std::string kv_offload = "auto"; // "auto" | "on" | "off" (zero-copy mapped pinned host global KV spill)
     bool enable_dspark = true;
     int spec_beam = -1;          // --draft-beam N: 1 = one linear chain (the block drafter), 4 = the beam tree (default); < 0 = STRATA_INK_SPEC_BEAM or 4
+    int spec_nodes = -1;         // --draft-nodes N: verify-window size, 1..12 (default 12); < 0 = STRATA_INK_SPEC_NODES or 12. The window sets
+                                 // both how many tokens a step can accept and how many DISTINCT experts it routes to: at top-8 over 128 experts
+                                 // and 5 rows the union is already a third of the experts, so a wider window reads more weight per step
     double spec_cost = -1.0;     // --draft-cost R: the MoE share of a verify step in the window-size model (default 4.2)
     double spec_plain = -1.0;    // --draft-plain X: > 0 lets a step fall back to one plain token when the drafter's expected tokens do not pay for the window (1.0 = break-even)
     bool spec_adapt = false;     // --draft-adapt: per request, drafting goes off for 40 steps when its measured gain falls below 0.93 (all backends, see ink_serve.h)

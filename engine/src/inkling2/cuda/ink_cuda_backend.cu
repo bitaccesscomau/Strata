@@ -116,12 +116,15 @@ public:
 
     bool init(const InkModelFile& mf, const BackendOpts& opts, std::string& err) override {
         if (const char* e = std::getenv("STRATA_INK_SPEC_BEAM")) spec_cfg_.beam = std::atoi(e);
+        if (const char* e = std::getenv("STRATA_INK_SPEC_NODES")) spec_cfg_.nodes = std::atoi(e);
         if (const char* e = std::getenv("STRATA_INK_SPEC_COST")) spec_cfg_.cost = (float)std::atof(e);
         if (const char* e = std::getenv("STRATA_INK_SPEC_PLAIN")) spec_cfg_.plain = (float)std::atof(e);
         if (opts.spec_beam > 0) spec_cfg_.beam = opts.spec_beam;
+        if (opts.spec_nodes > 0) spec_cfg_.nodes = opts.spec_nodes;
         if (opts.spec_cost > 0.0) spec_cfg_.cost = (float)opts.spec_cost;
         if (opts.spec_plain >= 0.0) spec_cfg_.plain = (float)opts.spec_plain;
         spec_cfg_.beam = std::max(1, std::min(8, spec_cfg_.beam));
+        spec_cfg_.nodes = std::max(1, std::min(12, spec_cfg_.nodes));
         spec_cfg_.log = std::getenv("STRATA_INK_SPEC_LOG") != nullptr;
         cleanup();
         int n_dev = 0;
@@ -1076,7 +1079,7 @@ public:
 
         // 2. True W=4 Multi-Branch Sparse-MoE Bayes-Optimal Adaptive Beam Tree (M* in {3,4,5,6,8,10,12})!
         strata::ink::InkTreeSpec tr{};
-        const int max_nodes = std::min(12, runner_->tree_cap);
+        const int max_nodes = std::min(spec_cfg_.nodes, runner_->tree_cap);
         dspark_->draft_beam_tree(anchor_tok, anchor_pos, spec_cfg_.beam, max_nodes, tr, spec_cfg_.cost, spec_cfg_.plain);
 
         // 3. Single CUDA-Graph 48-visit tree verify + exact GPU screened argmax (ZERO 6.4 MB logits D2H!)
@@ -1207,7 +1210,7 @@ private:
     int max_slots_ = 1;
     int eff_max_ctx_ = 4096;
     // The drafter's window shape: --draft-beam / --draft-cost / --draft-plain (or STRATA_INK_SPEC_BEAM / _COST / _PLAIN), STRATA_INK_SPEC_LOG=1 prints stats
-    struct SpecCfg { int beam = 4; float cost = 4.2f; float plain = 0.0f; bool log = false; } spec_cfg_;
+    struct SpecCfg { int beam = 4; int nodes = 12; float cost = 4.2f; float plain = 0.0f; bool log = false; } spec_cfg_;
     bool kv_grow_failed_ = false;    // the last forward_batch ended only because the global K/V could not grow
     int eff_chunk_run_ = 0;          // the prefill chunk the runner really got (after auto / halve-on-fail)
     int dspark_slot_ = -1;
