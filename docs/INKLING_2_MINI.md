@@ -318,3 +318,15 @@ Two nodes read +5.0% at 65K and cost 4.0% at 1K greedy, so the engine gained `--
 `--draft-nodes-switch POS` (default 40,960): four nodes below the switch, two above. Verified served against a flat
 four, every other cell inside 0.7%; both entries carry it. The bench disagrees at 1K (it prefers six nodes), which is
 the fourth time it has flattered a configuration the served path does not deliver.
+
+## Twelfth campaign: the depth window is at its optimum
+
+| deep nodes | 1K greedy | 30K greedy | 65K greedy | 65K sampled |
+|---:|---:|---:|---:|---:|
+| **2** (promoted) | 107.4 / 106.7 | 73.8 / 72.9 | **57.5 / 57.3** | 41.5 / 41.3 |
+| 3 | 106.9 | 73.0 | 57.3 | 41.3 |
+| 4 (flat) | 106.6 | 72.9 | 54.5 | 41.3 |
+
+Two and three tie and four loses 5%, so `--draft-nodes-deep 2` is at the optimum. The deep window's beam width is flat
+too (beams 1, 2 and 4 all read 57.4-57.6 at the 65K cell), so no further knob was added: the window-size question is
+closed in both of its dimensions.
