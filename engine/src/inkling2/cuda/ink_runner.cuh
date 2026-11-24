@@ -267,6 +267,10 @@ struct InkCudaModel {
     // Exact 2-stage unembed screening index (for BF16 unembed in SQ-20)
     UnembedScreenIndex unembed_screen;
 
+    // One BF16 copy of a quantised unembed, built once when VRAM allows. Without it every head call dequantises the
+    // whole 207 MB head before its GEMM: measured 15-17 ms of every serve step at M ~ 5 (STRATA_INK_PROF host), against
+    // a GEMV at this shape that should read 207 MB in ~0.25 ms.
+    __nv_bfloat16* d_unembed_bf16 = nullptr;
 
     const uint8_t* trunk_ptr(const std::string& name) const {
         return d_trunk + man.get(name).off;
@@ -709,6 +713,40 @@ struct InkCudaModel {
                 INK_CK(cudaDeviceSynchronize());
                 unembed_screen.ready = true;
             }
+        }
+
+        // 4b. Keep one BF16 copy of a quantised head when there is room (see d_unembed_bf16): the fallback in linear()
+        // dequantises the whole head per call. Skip when VRAM is tight; the per-call path stays correct either way.
+        if (ui.fmt != FMT_BF16 && (ui.fmt == FMT_S5_K || ui.fmt == FMT_S6_K || ui.fmt == FMT_S8_K)) {
+            const int V = man.c.vocab_unpadded;
+            const size_t need = (size_t)V * kInkHidden * sizeof(__nv_bfloat16);
+            INK_CK(ink_cuda_mem_info(&vfree, &vtot));
+            __nv_bfloat16* w_tile = nullptr;
+            cudaStream_t deq_st = nullptr;   // the model is built before the runner's stream exists: own stream, freed below
+            cudaStreamCreateWithFlags(&deq_st, cudaStreamNonBlocking);
+            if (vfree > need + (4096ull << 20) && cudaMalloc(&d_unembed_bf16, need) == cudaSuccess) {
+                const int tile_n = (int)kInkDsparkInter;
+                if (cudaMalloc(&w_tile, (size_t)tile_n * kInkHidden * sizeof(__nv_bfloat16)) == cudaSuccess) {
+                    const size_t row_b = (size_t)(kInkHidden / 256) * ink_sb_bytes(ui.fmt);
+                    for (int n0 = 0; n0 < V; n0 += tile_n) {
+                        const int nt = std::min(tile_n, V - n0);
+                        dim3 dg((kInkHidden + 255) / 256, nt);
+                        const uint8_t* Wsub = d_trunk + ui.off + (size_t)n0 * row_b;
+                        if (ui.fmt == FMT_S5_K)      k_ink_sk_to_bf16<FMT_S5_K><<<dg, 256, 0, deq_st>>>(Wsub, w_tile, nt, kInkHidden);
+                        else if (ui.fmt == FMT_S6_K) k_ink_sk_to_bf16<FMT_S6_K><<<dg, 256, 0, deq_st>>>(Wsub, w_tile, nt, kInkHidden);
+                        else                         k_ink_sk_to_bf16<FMT_S8_K><<<dg, 256, 0, deq_st>>>(Wsub, w_tile, nt, kInkHidden);
+                        INK_CK(cudaMemcpyAsync(d_unembed_bf16 + (size_t)n0 * kInkHidden, w_tile,
+                                               (size_t)nt * kInkHidden * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice, deq_st));
+                    }
+                    INK_CK(cudaStreamSynchronize(deq_st));
+                } else {
+                    cudaGetLastError();
+                    cudaFree(d_unembed_bf16);
+                    d_unembed_bf16 = nullptr;
+                }
+                if (w_tile) { cudaFree(w_tile); w_tile = nullptr; }
+            }
+            cudaStreamDestroy(deq_st);
         }
 
         std::fprintf(stderr, "[InkCUDA] Loaded %s (%s): trunk=%.2f GB (%.2fs), experts=%zu VRAM / %zu host (%.2fs, hyb=%d, promo=%d, pf_buf=%.0fMB), sm120_tc=%d, screen=%d\n",
@@ -1701,6 +1739,7 @@ struct InkCudaModel {
     }
 
     void free_all() {
+        if (d_unembed_bf16) { cudaFree(d_unembed_bf16); d_unembed_bf16 = nullptr; }
         if (ep2_active && peer_gpu >= 0) {
             cudaSetDevice(peer_gpu);
             for (int il = 0; il < 24; ++il) {
@@ -2956,23 +2995,21 @@ struct InkCudaRunner {
         const int cur_cc = m.ls_active ? m.stage_cc[cur_stage] : m.sm_cc;
         const bool cur_attn_fp16 = m.ls_active ? m.stage_trunk_attn_fp16[cur_stage] : m.trunk_attn_fp16;
 
-        // The head is the one GEMV whose CTA count is the vocabulary (25,008 CTAs at 8 rows each), and that launch storm
-        // measured 15-17 ms of every serve step at M ~ 5 (STRATA_INK_PROF host) for 922 MB of weights. The persistent
-        // kernel walks the same 8-row groups from a fixed grid, with the same K tiles and lane assignment, so every row
-        // sums in the same order as k_ink_gemv_multi_bf16.
-        if (ti.fmt == FMT_BF16 && tname == "model.llm.unembed.weight" && M >= 1 && M <= 16) {
-            static int head_grid = 0;
-            if (head_grid == 0) {
-                int dev = 0, sms = 0;
-                cudaGetDevice(&dev);
-                cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
-                head_grid = std::max(64, std::min((N + 7) / 8, sms * 8));
+        // A quantised head with the one BF16 copy built at load: GEMV straight from the copy instead of the per-call
+        // dequantise-into-scratch-then-cuBLAS path below (15-17 ms of every serve step at M ~ 5, STRATA_INK_PROF).
+        if (m.d_unembed_bf16 && tname == "model.llm.unembed.weight" && ti.fmt != FMT_BF16 &&
+            (int)ti.rows() == N && (int)ti.cols() == kInkHidden) {
+            InkMultiProj mp{};
+            mp.W[0] = reinterpret_cast<const uint8_t*>(m.d_unembed_bf16);
+            mp.Y[0] = Y; mp.N[0] = N; mp.cumN[0] = 0; mp.cumN[1] = N; mp.count = 1;
+            if (M <= 7) {
+                const int grid = (N + 7) / 8;
+                if (M == 1)      k_ink_gemv_multi_bf16<1, false><<<grid, 128, 0, st>>>(mp, X, M, K);
+                else if (M <= 4) k_ink_gemv_multi_bf16<4, false><<<grid, 128, 0, st>>>(mp, X, M, K);
+                else             k_ink_gemv_multi_bf16<8, false><<<grid, 128, 0, st>>>(mp, X, M, K);
+            } else {
+                gemm_bf16_compat(reinterpret_cast<const __nv_bfloat16*>(m.d_unembed_bf16), X, Y, M, N, K, N, reuse_x_bf16, false);
             }
-            const auto* Wb = reinterpret_cast<const __nv_bfloat16*>(W);
-            if (M == 1)      k_ink_gemv_head_bf16<1><<<head_grid, 128, 0, st>>>(Wb, X, M, N, K, Y);
-            else if (M <= 4) k_ink_gemv_head_bf16<4><<<head_grid, 128, 0, st>>>(Wb, X, M, N, K, Y);
-            else if (M <= 8) k_ink_gemv_head_bf16<8><<<head_grid, 128, 0, st>>>(Wb, X, M, N, K, Y);
-            else             k_ink_gemv_head_bf16<16><<<head_grid, 128, 0, st>>>(Wb, X, M, N, K, Y);
             return;
         }
 
