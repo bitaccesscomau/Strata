@@ -256,3 +256,17 @@ shape, four nodes, two runs a cell:
 
 Both served entries carry it; through the router a 118,210-token prompt answers correctly with prefill 1,234 tok/s and
 decode 50.4 tok/s.
+
+## Eighth campaign: slot scaling, and why the 64K entry keeps four (2026-11-25)
+
+| slots | aggregate decode (bench) | per stream | prefill |
+|---:|---:|---:|---:|
+| 2 | 94.0 | 47.0 | 2,454 |
+| 4 | 151.7 | 37.9 | 2,437 |
+| 6 | 179.7 | 30.0 | 2,365 |
+| 8 | 221.8 | 27.7 | 2,345 |
+
+A six-slot soak passes (six concurrent 20K-token requests, six of six passphrases). Through the router, six slots gave
+**132.0 tok/s aggregate at 22.0 a stream** against four slots' 122.2 at 30.5 - +8% aggregate for -28% per stream - so
+the entry keeps four slots. Eight full-depth slots would not fit VRAM either (8 x 1.05 GB of 64K K/V, 2.4 GB of
+workspace and 14 GB of weights against 24 GB).
