@@ -34058,6 +34058,39 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_PIPELINE_SNAP_RING",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "engine/src/program/generate.cpp",
+     "line": 13214,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "29c3a99664",
+   "first_date": "2026-11-22",
+   "since": null,
+   "last_commit": "29c3a99664",
+   "last_date": "2026-11-22",
+   "status": "opt-in",
+   "owner": "program",
+   "note": "[downstream champion] upstream #3944 (open): =1 with --pipeline-windows 2: a front stage's GDN state lives in one of its snapshot buffers and a speculative commit writes a free one, so no snapshot copy beside the window (same bits; refused, said once, with STRATA_QFUSE, STRATA_PIPELINE_SNAP_OVERLAP=0, STRATA_COMMIT_BATCH=0, STRATA_GDN_SPLIT=1, STRATA_GDN_COMMIT_SPLIT=0, STRATA_DBG_GDN=1, Metal). 2x RTX 3090: decode after a 177K read -0.8% ms/token, identical tokens.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_PIPELINE_SPEC_DEPTH",
    "backends": [
     "cuda-hip"
@@ -34211,6 +34244,41 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_PIPE_ADAPT_CHECK",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "engine/src/program/generate.cpp",
+     "line": 17558,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/BATCHING.md:448"
+   ],
+   "first_commit": "7fe4d54a50",
+   "first_date": "2026-11-22",
+   "since": null,
+   "last_commit": "7fe4d54a50",
+   "last_date": "2026-11-22",
+   "status": "retired",
+   "owner": "program",
+   "note": "[downstream champion] not carried onto v0.2.21: the adaptive tier's blocking round was rewritten upstream (adapt_tick, per-stage, and the opt-in --adapt-async 1 thread), so the staged round is re-expressed by --adapt-async rather than re-merged blind; the commit stays on champion/v0.2.19-port. Measure --adapt-async 1 in the gates.",
+   "retire_after": "",
+   "retired_in": "v0.2.21 port"
+  },
+  {
    "name": "STRATA_PIPE_ADAPT_EVERY",
    "backends": [
     "cuda-hip"
@@ -34259,6 +34327,42 @@
    "note": "[reviewed] \"(opt-in; unset or 0: off, as before)\". [code comment (generate.cpp)]",
    "retire_after": "",
    "retired_in": ""
+  },
+  {
+   "name": "STRATA_PIPE_ADAPT_STAGED",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "engine/src/program/generate.cpp",
+     "line": 17432,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "string",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/BATCHING.md:413",
+    "docs/BATCHING.md:435"
+   ],
+   "first_commit": "7fe4d54a50",
+   "first_date": "2026-11-22",
+   "since": null,
+   "last_commit": "7fe4d54a50",
+   "last_date": "2026-11-22",
+   "status": "retired",
+   "owner": "program",
+   "note": "[downstream champion] not carried onto v0.2.21: the adaptive tier's blocking round was rewritten upstream (adapt_tick, per-stage, and the opt-in --adapt-async 1 thread), so the staged round is re-expressed by --adapt-async rather than re-merged blind; the commit stays on champion/v0.2.19-port. Measure --adapt-async 1 in the gates.",
+   "retire_after": "",
+   "retired_in": "v0.2.21 port"
   },
   {
    "name": "STRATA_PIPE_BYIELD_NODRAIN",
@@ -42531,6 +42635,39 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_ROUTE_TAIL_SKIP_BATCH",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "engine/src/program/generate.cpp",
+     "line": 14486,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "",
+   "first_date": "2026-11-23",
+   "since": null,
+   "last_commit": "",
+   "last_date": "2026-11-23",
+   "status": "opt-in",
+   "owner": "program",
+   "note": "[downstream champion] 0.1.61's rule: with --batch slots a set STRATA_ROUTE_TAIL_SKIP rank is turned off at start-up (a verify window mixes requests, so one request's skip would depend on another's tokens; 2x RTX 3090 4-slot greedy 2/4 identical to solo with rank 7, 4/4 with it off). =1 keeps the rank beside batch slots, which is upstream v0.2.18's behaviour.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_ROUTE_WIN",
    "backends": [
     "cuda-hip"
@@ -42821,6 +42958,39 @@
    "status": "research",
    "owner": "kernels/qsa_select_long_parity.cpp",
    "note": "[reviewed] Used with TOPK_MULTI in a parity test. [src/kernels/qsa_select_long_parity.cpp:6]",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_SCORES_GRID",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "engine/src/kernels/cuda/qsa_select.cu",
+     "line": 2101,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "3d49c44a65",
+   "first_date": "2026-11-22",
+   "since": null,
+   "last_commit": "3d49c44a65",
+   "last_date": "2026-11-22",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "[downstream champion] =1: the decode QSA block scorers (no active count) launch one full wave from the occupancy calculator instead of a fixed 256 CTAs; =N>1: N CTAs. Same bits (qsa_rows_bench --dump). 2x RTX 3090: 856K decode +3.5%.",
    "retire_after": "",
    "retired_in": ""
   },
@@ -44216,6 +44386,39 @@
    "status": "default",
    "owner": "program",
    "note": "the engine's own default (the parallel-request stack, bit-exact, QUAL-PAR): on with 2 or more batch slots on Linux CUDA (arch_defaults.cpp parallel_default_env_cuda, applied in generate.cpp) and on Windows gfx1151; NAME=0 turns it off; a value you set is kept",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_SLOT_PARK_SKIP",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "engine/src/program/generate.cpp",
+     "line": 19318,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "8480b2d17e",
+   "first_date": "2026-11-22",
+   "since": null,
+   "last_commit": "8480b2d17e",
+   "last_date": "2026-11-22",
+   "status": "default",
+   "owner": "program",
+   "note": "[downstream champion] on unless 0, with batch slots: a request does not park the main sessions' conversation that a batch slot holds at least as far (chain root and pinned prefixes parked already), and an admission does not park its own slot's last turn within --conversation-cache-rewind-keep; 0.45-0.65 s a park at 178K on 2x RTX 3090. Upstream took #5864 without it (one token differed after a skipped park on two cards, generate.cpp comment); =0 is upstream's behaviour.",
    "retire_after": "",
    "retired_in": ""
   },

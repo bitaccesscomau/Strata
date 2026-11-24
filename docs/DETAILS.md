@@ -1489,6 +1489,14 @@ that one compute capability. The identity gate (10 prompts plus exact_pp 4K/20K,
 | sm_120 (RTX 50 and RTX PRO Blackwell) | `STRATA_SIDE_MIXER=2`, `STRATA_ATTN_DAILY=1`, `STRATA_GR_UP75=1`, `STRATA_GR_DOWN_TG=1`, `STRATA_GU_SWIGLU=1` | `STRATA_SM120_PERF=0` |
 | sm_121 (GB10, DGX Spark) | the six of its own table ([DGX_SPARK_LINUX.md](DGX_SPARK_LINUX.md)), and of the sm_120 set `STRATA_ATTN_DAILY=1` and `STRATA_GR_DOWN_TG=2` (measured there, same bits); the rest of the sm_120 set measured level or slower on a GB10 and stays off | `STRATA_SM121_PERF=0` |
 
+Long-context decode on sm_86 (a stride of 65,536 blocks or more, i.e. `--max-context` 262144 and up) also uses the
+multi-CTA radix top-k that Turing has used for decode. Past ~131K blocks the register kernel does not fit, and the
+fallback wide kernel runs one 1,024-thread CTA per row - four CTAs on an 82-SM card, six passes over the whole score
+array each. On an RTX 3090 with Swift IQ3_S at a 524,288 context (one 460,185-token prompt, 192 greedy tokens):
+12.70 -> 11.85 ms per token and 74.6 -> 80.2 tok/s decode, identical draft acceptance (107/180) and prompt speed
+unchanged; the ids are the reference radix's at 131,074 blocks (`qsa_topk_parity --selftest`: 8 queries, 0.664 ms
+reference, 0.063 ms dispatched, 8/8 identical). `STRATA_TOPK_SPLIT=0` keeps the wide kernel.
+
 `STRATA_ADAPT_OVERLAP=1` does not run beside `STRATA_ADAPT_LAG` / `STRATA_ADAPT_NOWAIT`: set `STRATA_ADAPT_LAG=1
 STRATA_ADAPT_NOWAIT=0` with it. Switches that did not pay or were mixed are left out of every set: `STRATA_EXPDEC`,
 `STRATA_GR_NORM_FAST`, `STRATA_RAM_ADAPT`, `STRATA_KV_HOST_REGISTER`, `STRATA_HOST_CORE`, `STRATA_GR_DOWN_TG` (sm_86),

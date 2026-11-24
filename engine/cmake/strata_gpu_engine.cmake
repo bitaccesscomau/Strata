@@ -18,7 +18,10 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   # The selected runtime is PUBLIC because graph.cpp is a HOST translation unit that calls cudaGraphLaunch and
   # cudaEventQuery: the .cu sources get cudart through the CUDA language rules, a .cpp does not, and the
   # linker error ("unresolved external symbol cudaGraphInstantiate") names the function rather than the cause.
-  target_link_libraries(strata_core PUBLIC strata_plan strata_warnings ${_strata_gpu_runtime_target} ${CMAKE_DL_LIBS})
+  # pinned.cu (in this library) reads strata::kernels::cpu::expert_layout(), so the CPU expert kernels are part of
+  # this library's interface: the engine binary linked them already, the tools and some tests did not and their
+  # links stopped on it in v0.2.21.
+  target_link_libraries(strata_core PUBLIC strata_plan strata_warnings strata_kernels_cpu ${_strata_gpu_runtime_target} ${CMAKE_DL_LIBS})
 
   add_executable(strata-device src/core/device_main.cpp)
   target_link_libraries(strata-device PRIVATE strata_core)
