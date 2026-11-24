@@ -2959,24 +2959,6 @@ struct InkCudaRunner {
         const int cur_cc = m.ls_active ? m.stage_cc[cur_stage] : m.sm_cc;
         const bool cur_attn_fp16 = m.ls_active ? m.stage_trunk_attn_fp16[cur_stage] : m.trunk_attn_fp16;
 
-        // A quantised head with the one BF16 copy built at load: GEMV straight from the copy instead of the per-call
-        // dequantise-into-scratch-then-cuBLAS path below (15-17 ms of every serve step at M ~ 5, STRATA_INK_PROF).
-        if (m.d_unembed_bf16 && tname == "model.llm.unembed.weight" && ti.fmt != FMT_BF16 &&
-            (int)ti.rows() == N && (int)ti.cols() == kInkHidden) {
-            InkMultiProj mp{};
-            mp.W[0] = reinterpret_cast<const uint8_t*>(m.d_unembed_bf16);
-            mp.Y[0] = Y; mp.N[0] = N; mp.cumN[0] = 0; mp.cumN[1] = N; mp.count = 1;
-            if (M <= 7) {
-                const int grid = (N + 7) / 8;
-                if (M == 1)      k_ink_gemv_multi_bf16<1, false><<<grid, 128, 0, st>>>(mp, X, M, K);
-                else if (M <= 4) k_ink_gemv_multi_bf16<4, false><<<grid, 128, 0, st>>>(mp, X, M, K);
-                else             k_ink_gemv_multi_bf16<8, false><<<grid, 128, 0, st>>>(mp, X, M, K);
-            } else {
-                gemm_bf16_compat(reinterpret_cast<const __nv_bfloat16*>(m.d_unembed_bf16), X, Y, M, N, K, N, reuse_x_bf16, false);
-            }
-            return;
-        }
-
         if (ti.fmt == FMT_BF16) {
             const bool is_fp16 = cur_attn_fp16 && (tname.find(".attn.") != std::string::npos);
             const int bf16_gemv_max = is_fp16 ? 3 : ((exact_fp32_x || cur_cc < 80) ? 16 : 7);
