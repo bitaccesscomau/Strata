@@ -215,3 +215,21 @@ linears are BF16 on SQ-15; it is reverted and the negative is recorded.
 
 The four-slot 64K entry also passed a sustained soak this round: four 30,000-token requests with passphrases at 85%
 depth, 93 s, four of four found.
+
+## Sixth campaign: the prefill tile is worth 72%, and it is already on (2026-11-25)
+
+The 64-row expert tile at prefill (`STRATA_INK_PF_TILE`, default on) is the largest prefill lever in the engine:
+
+| prompt | tile on | tile off | gain |
+|---|---:|---:|---:|
+| 30K, three interleaved pairs | 1,938-2,028 tok/s | 1,125-1,150 tok/s | **+72%** |
+| 128K | 1,162 tok/s | 814 tok/s | **+43%** |
+
+It decodes each expert's weight tile once per 64 tokens instead of once per 16. The published prefill figures
+(1,900-2,400 tok/s) are the tile-on path; `STRATA_INK_PF_TILE=0` throws 42% away.
+
+An S_K variant of the same gate was written and measured bit-correct on the answers, read ladder and passphrase gates
+but changed nothing on SQ-15, because the sf4/mx8 gate already selects the tile path for its experts; the reverted
+build reproduced the numbers (1,978.5/1,905.0 on, 1,154.9/1,129.5 off), so the change was reverted.
+
+With the tile on, a prefill chunk is 56% MoE on the int8/dp4a expert kernels: the next win there is expert-GEMM work.
