@@ -3682,7 +3682,12 @@ inline void launch_ink_moe_dispatch_only(
     // bit-identical results.  STRATA_INK_PF_TILE=0 keeps the 16-token kernel.
     static const bool pf_tile_env = [] { const char* e = std::getenv("STRATA_INK_PF_TILE"); return !(e && e[0] == '0'); }();
     const bool use_pf_tile = pf_tile_env && use_fp16_tc && M >= kInkPrefillTileMinM && (info.has_sf4 || info.has_mx8);
+    // S_K experts at prefill take the same 64-row tile: k_ink_moe_sk_tc already has the <..., 64> instantiation, but the
+    // gate above only reaches it when use_fp16_tc is false, which never happens on sm_86 (int8 tensor cores are there).
+    // The dot products are the same, in the same block order, so the rows come out bit-identical.
+    const bool sk_tile64 = pf_tile_env && use_fp16_tc && info.has_sk && M >= kInkPrefillTileMinM;
     const int tile_rows = use_pf_tile ? kInkPrefillTileRows
+                        : sk_tile64 ? kInkPrefillTileRows
                         : use_wmma_tc ? ((M <= 128) ? 16 : 64)
                                       : ((M <= 128 || use_fp16_tc) ? 16 : 64);
     k_ink_moe_bin<<<1, 128, 0, st>>>(experts, ws.topk_idx, M, tile_rows, ws.tb);
