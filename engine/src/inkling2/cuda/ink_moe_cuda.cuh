@@ -3798,14 +3798,21 @@ inline void launch_ink_moe_dispatch_only(
             else                 k_ink_moe_sk_tc<false, 64><<<grid, 256, 0, st>>>(sec4_base, experts, ws.tb, ws.hq_sk, ws.topk_w, ws.y_pair);
         } else {
             dim3 g32(kInkInter / 32, max_act);
+            // The rows an expert holds are processed MAX_M at a time and every pass re-reads its body: a 12-node verify
+            // tree at MAX_M = 4 read each body three times (champion round 24: decode 94 -> 154.8 tok/s at a 4K prompt
+            // on an RTX 3090, SQ-15).  Take the width from the rows a step holds.
             if (M == 1)       launch_ink_moe_gu_sk_mask<1>(g32, st, info.sk_gu_mask, sec4_base, experts, ws.tb, ws.xq_sk, ws.h_f32);
-            else if (M <= 32) launch_ink_moe_gu_sk_mask<4>(g32, st, info.sk_gu_mask, sec4_base, experts, ws.tb, ws.xq_sk, ws.h_f32);
-            else              launch_ink_moe_gu_sk_mask<16>(g32, st, info.sk_gu_mask, sec4_base, experts, ws.tb, ws.xq_sk, ws.h_f32);
+            else if (M <= 4)  launch_ink_moe_gu_sk_mask<4>(g32, st, info.sk_gu_mask, sec4_base, experts, ws.tb, ws.xq_sk, ws.h_f32);
+            else if (M <= 8)  launch_ink_moe_gu_sk_mask<8>(g32, st, info.sk_gu_mask, sec4_base, experts, ws.tb, ws.xq_sk, ws.h_f32);
+            else if (M <= 16) launch_ink_moe_gu_sk_mask<16>(g32, st, info.sk_gu_mask, sec4_base, experts, ws.tb, ws.xq_sk, ws.h_f32);
+            else              launch_ink_moe_gu_sk_mask<32>(g32, st, info.sk_gu_mask, sec4_base, experts, ws.tb, ws.xq_sk, ws.h_f32);
             const int nblk_h = P * (kInkInter / 64);
             k_ink_quant_q8_1<<<(nblk_h + 7) / 8, 256, 0, st>>>(ws.h_f32, ws.hq_sk, P, kInkInter);
             if (M == 1)       launch_ink_moe_dn_sk_mask<1>(g32, st, info.sk_dn_mask, sec4_base, experts, ws.tb, ws.hq_sk, ws.topk_w, ws.y_pair);
-            else if (M <= 32) launch_ink_moe_dn_sk_mask<4>(g32, st, info.sk_dn_mask, sec4_base, experts, ws.tb, ws.hq_sk, ws.topk_w, ws.y_pair);
-            else              launch_ink_moe_dn_sk_mask<16>(g32, st, info.sk_dn_mask, sec4_base, experts, ws.tb, ws.hq_sk, ws.topk_w, ws.y_pair);
+            else if (M <= 4)  launch_ink_moe_dn_sk_mask<4>(g32, st, info.sk_dn_mask, sec4_base, experts, ws.tb, ws.hq_sk, ws.topk_w, ws.y_pair);
+            else if (M <= 8)  launch_ink_moe_dn_sk_mask<8>(g32, st, info.sk_dn_mask, sec4_base, experts, ws.tb, ws.hq_sk, ws.topk_w, ws.y_pair);
+            else if (M <= 16) launch_ink_moe_dn_sk_mask<16>(g32, st, info.sk_dn_mask, sec4_base, experts, ws.tb, ws.hq_sk, ws.topk_w, ws.y_pair);
+            else              launch_ink_moe_dn_sk_mask<32>(g32, st, info.sk_dn_mask, sec4_base, experts, ws.tb, ws.hq_sk, ws.topk_w, ws.y_pair);
         }
     }
 
